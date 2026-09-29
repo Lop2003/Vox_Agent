@@ -1,0 +1,23 @@
+[
+  { "name": "Claude Code", "cli": "claude" },
+  { "name": "Claude Haiku (cheap)", "cli": "claude", "args": ["--model", "haiku"] },
+  { "name": "Codex", "cli": "codex" },
+  {
+    "name": "OpenRouter",
+    "cli": "codex",
+    "args": [
+      "-c", "model_providers.openrouter={ name = \"OpenRouter\", base_url = \"https://openrouter.ai/api/v1\", env_key = \"OPENROUTER_API_KEY\" }",
+      "-c", "model_provider=\"openrouter\"",
+      "-m", "qwen/qwen3-coder"
+    ]
+  },
+  {
+    "name": "Local (Ollama on Mac)",
+    "cli": "codex",
+    "args": [
+      "-c", "model_providers.macollama={ name = \"Ollama\", base_url = \"http://MAC_TAILSCALE_IP:11434/v1\" }",
+      "-c", "model_provider=\"macollama\"",
+      "-m", "qwen3:8b"
+    ]
+  }
+]

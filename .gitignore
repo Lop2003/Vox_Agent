@@ -1,0 +1,29 @@
+# Swift / Xcode build output
+.build/
+build/
+DerivedData/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.ipa
+*.dSYM/
+*.dSYM.zip
+
+# Node (bridge)
+node_modules/
+npm-debug.log*
+
+# Secrets and local config — never commit these
+.env
+.env.*
+*.pem
+*.p12
+*.mobileprovision
+.voxcode/
+
+# macOS
+.DS_Store
+._*
