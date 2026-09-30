@@ -56,7 +56,7 @@ public struct ConversationView: View {
         VStack(spacing: 0) {
             Spacer(minLength: 24)
             VStack(spacing: 12) {
-                LogoTile(size: 72)
+                LogoMark(size: 88)
                 Text("มีอะไรให้ช่วยไหม").font(.title2.bold())
                 Text(emptyHint)
                     .font(.subheadline)
@@ -97,8 +97,8 @@ public struct ConversationView: View {
     }
 }
 
-/// The Vox Agent mark on its dark brand tile, as on the app icon.
-public struct LogoTile: View {
+/// The Vox Agent mark (transparent Logo.png). The tiled version is only the app icon.
+public struct LogoMark: View {
     let size: CGFloat
 
     public init(size: CGFloat) { self.size = size }
@@ -107,13 +107,8 @@ public struct LogoTile: View {
         logo
             .resizable()
             .scaledToFit()
-            .padding(size * 0.17)
             .frame(width: size, height: size)
-            .background(
-                LinearGradient(colors: [Color(white: 0.18), Color(white: 0.07)], startPoint: .top, endPoint: .bottom),
-                in: RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
-            )
-            .shadow(color: .black.opacity(0.18), radius: size * 0.12, y: size * 0.05)
+            .shadow(color: .black.opacity(0.12), radius: size * 0.06, y: size * 0.03) // keeps the light mark defined on white
             .accessibilityHidden(true)
     }
 

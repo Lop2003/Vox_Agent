@@ -95,6 +95,47 @@ public final class SpeechToTextService {
     }
 }
 
+/// Installed text-to-speech voices. The default pick is the most natural one (premium > enhanced > compact):
+/// `AVSpeechSynthesisVoice(language:)` returns the robotic compact voice even when a neural one is installed.
+public enum VoiceCatalog {
+    public struct Option: Hashable, Identifiable {
+        public let id: String
+        public let label: String
+    }
+
+    static func voices(for language: String) -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language == language }
+            .sorted { $0.quality.rawValue > $1.quality.rawValue }
+    }
+
+    public static func options(for language: String) -> [Option] {
+        voices(for: language).map { voice in
+            let quality = switch voice.quality {
+            case .premium: " · Premium"
+            case .enhanced: " · Enhanced"
+            default: ""
+            }
+            return Option(id: voice.identifier, label: voice.name + quality)
+        }
+    }
+
+    /// "" means automatic (best installed voice).
+    public static func preferredID(for language: String) -> String {
+        UserDefaults.standard.string(forKey: "voice.\(language)") ?? ""
+    }
+
+    public static func setPreferredID(_ id: String, for language: String) {
+        UserDefaults.standard.set(id, forKey: "voice.\(language)")
+    }
+
+    static func voice(for language: String) -> AVSpeechSynthesisVoice? {
+        let id = preferredID(for: language)
+        if !id.isEmpty, let chosen = AVSpeechSynthesisVoice(identifier: id) { return chosen }
+        return voices(for: language).first ?? AVSpeechSynthesisVoice(language: language)
+    }
+}
+
 /// Reads agent replies aloud with AVSpeechSynthesizer, picking a Thai or English voice.
 final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {  // used from the main actor only
     private let synthesizer = AVSpeechSynthesizer()
@@ -116,7 +157,7 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @uncheck
     /// Speaks after whatever is already queued.
     @MainActor func enqueue(_ text: String) throws {
         let language = NLLanguageRecognizer.dominantLanguage(for: text) == .english ? "en-US" : "th-TH"
-        guard let voice = AVSpeechSynthesisVoice(language: language) ?? AVSpeechSynthesisVoice(language: "en-US") else {
+        guard let voice = VoiceCatalog.voice(for: language) ?? AVSpeechSynthesisVoice(language: "en-US") else {
             throw VoxError("No text-to-speech voice installed for \(language).")
         }
         let utterance = AVSpeechUtterance(string: text)

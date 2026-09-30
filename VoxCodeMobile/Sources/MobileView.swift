@@ -6,7 +6,36 @@ struct MobileView: View {
     @State private var model = AppModel()
     @State private var bridge = BridgeClient()
     @State private var showPairing = false
+    @AppStorage("theme") private var theme = Theme.system
     @Environment(\.scenePhase) private var scenePhase
+
+    enum Theme: String, CaseIterable {
+        case system, light, dark
+
+        var label: String {
+            switch self {
+            case .system: "System"
+            case .light: "Light"
+            case .dark: "Dark"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .system: "circle.lefthalf.filled"
+            case .light: "sun.max"
+            case .dark: "moon"
+            }
+        }
+
+        var colorScheme: ColorScheme? {
+            switch self {
+            case .system: nil
+            case .light: .light
+            case .dark: .dark
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -31,6 +60,7 @@ struct MobileView: View {
         // Keep the screen on during a call, like the Phone app.
         .onChange(of: model.inCall) { UIApplication.shared.isIdleTimerDisabled = model.inCall }
         .sensoryFeedback(.impact, trigger: model.phase == .listening)
+        .preferredColorScheme(theme.colorScheme)
     }
 
     private func reconnect() {
@@ -51,10 +81,22 @@ struct MobileView: View {
                 .disabled(model.turns.isEmpty)
         }
         ToolbarItem(placement: .principal) {
-            // Title doubles as the connection status, like a chat app's "online" line.
-            Button { showPairing = true } label: {
+            // The title is the agent picker (like a chat app's model switcher); the line below is the connection.
+            Menu {
+                Picker("Agent", selection: $model.agent) {
+                    ForEach(model.agents, id: \.self) { Text($0).tag($0) }
+                }
+                .disabled(model.phase == .running)
+                Divider()
+                Button("Pair…", systemImage: "link") { showPairing = true }
+            } label: {
                 VStack(spacing: 1) {
-                    Text("Vox Agent").font(.headline)
+                    HStack(spacing: 4) {
+                        Text(model.agents.isEmpty ? "Vox Agent" : model.agent).lineLimit(1)
+                        Image(systemName: "chevron.down").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.primary)
                     HStack(spacing: 4) {
                         Circle().fill(connectionColor).frame(width: 6, height: 6)
                         Text(connectionText).lineLimit(1).truncationMode(.middle)
@@ -64,14 +106,27 @@ struct MobileView: View {
                 }
                 .frame(maxWidth: 240)
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Pair with your computer")
+            .accessibilityLabel("Agent: \(model.agent)")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Picker("Language", selection: $model.localeID) {
                     ForEach(SpeechToTextService.locales.sorted(by: >), id: \.key) { Text($0.value).tag($0.key) }
                 }
+                Picker(selection: $theme) {
+                    ForEach(Theme.allCases, id: \.self) { Label($0.label, systemImage: $0.icon).tag($0) }
+                } label: {
+                    Label("Appearance", systemImage: theme.icon)
+                }
+                .pickerStyle(.menu)
+                Picker(selection: $model.thaiVoice) {
+                    Text("Automatic (most natural)").tag("")
+                    ForEach(VoiceCatalog.options(for: "th-TH")) { Text($0.label).tag($0.id) }
+                } label: {
+                    Label("Thai voice", systemImage: "waveform")
+                }
+                .pickerStyle(.menu)
+                Divider()
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Read answers aloud", isOn: $model.autoSpeak)
                 Divider()
@@ -126,13 +181,11 @@ struct Composer: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            HStack(spacing: 8) {
-                agentMenu
-                Spacer(minLength: 8)
-                // Agent progress already shows on its card; the chip only covers dictation.
-                if model.phase == .listening || model.phase == .transcribing {
-                    statusChip.transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
+            // Agent progress already shows on its card; the chip only covers dictation.
+            if model.phase == .listening || model.phase == .transcribing {
+                statusChip
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             HStack(alignment: .bottom, spacing: 4) {
@@ -212,26 +265,6 @@ struct Composer: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
-    }
-
-    private var agentMenu: some View {
-        Menu {
-            Picker("Agent", selection: Bindable(model).agent) {
-                ForEach(model.agents, id: \.self) { Text($0).tag($0) }
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "sparkles")
-                Text(model.agents.isEmpty ? "No agent" : model.agent).lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.semibold))
-            }
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.regularMaterial, in: Capsule())
-        }
-        .disabled(model.phase == .running || model.agents.isEmpty)
     }
 
     private var statusChip: some View {

@@ -53,6 +53,15 @@ public final class AppModel {
     }
     public var activeFile = ""
 
+    /// Thai voice identifier, "" for the best installed one. Changing it plays a short sample.
+    public var thaiVoice = VoiceCatalog.preferredID(for: "th-TH") {
+        didSet {
+            VoiceCatalog.setPreferredID(thaiVoice, for: "th-TH")
+            try? tts.speak("สวัสดีครับ นี่คือเสียงที่จะใช้ตอบคุณ")
+            isSpeaking = true
+        }
+    }
+
     let silenceTimeout: Duration = .seconds(2)
 
     private let voice = VoiceInputManager()

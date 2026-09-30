@@ -110,6 +110,11 @@ struct ContentView: View {
                 }
                 .fixedSize()
                 .disabled(model.phase != .idle)
+                Picker("Voice", selection: $model.thaiVoice) {
+                    Text("Automatic").tag("")
+                    ForEach(VoiceCatalog.options(for: "th-TH")) { Text($0.label).tag($0.id) }
+                }
+                .fixedSize()
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Speak responses", isOn: $model.autoSpeak)
                 Spacer()

@@ -1,4 +1,5 @@
-// Regenerates the app icons and in-app logo from Assets/Brand/VoxCode-logo.png (transparent PNG).
+// Regenerates the app icons (logo on a dark tile) and the transparent in-app logo
+// from Assets/Brand/VoxCode-logo.png (transparent PNG).
 // Usage: swift scripts/make-icons.swift
 import AppKit
 
