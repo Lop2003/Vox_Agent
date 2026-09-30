@@ -45,7 +45,12 @@ import Testing
     #expect(try json(ClientMessage.cancel) == #"{"cancel":{}}"#)
 
     let decode = { (s: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(s.utf8)) }
-    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A","B"]}}"#) == .hello(workspace: "app", agents: ["A", "B"]))
+    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A","B"],"speech":true}}"#) == .hello(workspace: "app", agents: ["A", "B"], speech: true))
+    // Older bridges don't send "speech".
+    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A"]}}"#) == .hello(workspace: "app", agents: ["A"], speech: nil))
+    #expect(try decode(#"{"audio":{"id":"00000000-0000-0000-0000-000000000001","data":"AAEC"}}"#) == .audio(id: id, data: Data([0, 1, 2]), error: nil))
+    #expect(try decode(#"{"audio":{"id":"00000000-0000-0000-0000-000000000001","error":"no"}}"#) == .audio(id: id, data: nil, error: "no"))
+    #expect(try json(ClientMessage.speak(id: id, text: "hi")) == #"{"speak":{"id":"00000000-0000-0000-0000-000000000001","text":"hi"}}"#)
     #expect(try decode(#"{"event":{"id":"00000000-0000-0000-0000-000000000001","event":{"status":{"_0":"Editing"}}}}"#)
         == .event(id: id, event: .status(.editing)))
     #expect(try decode(#"{"finished":{"id":"00000000-0000-0000-0000-000000000001","status":"Failed","error":"x"}}"#)
@@ -205,6 +210,23 @@ private func bridgePID(port: UInt16) -> pid_t? {
     lsof.waitUntilExit()
     return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         .split(separator: "\n").first.flatMap { pid_t($0) }
+}
+
+/// The bridge voices text with the Mac's neural voices (needs the Swift toolchain, as on any dev Mac).
+@MainActor @Test(.enabled(if: nodeAvailable))
+func bridgeSpeaksThai() async throws {
+    let box = try Sandbox()
+    let bridge = try box.bridge()
+    defer { bridge.stop() }
+    let client = BridgeClient()
+    client.connect(pairingCode: bridge.pairingCode, host: "127.0.0.1", port: bridge.port)
+    await waitFor { client.isConnected }
+    #expect(client.canSpeak)
+
+    let audio = try await client.synthesize("สวัสดีครับ แก้ไฟล์เรียบร้อยแล้ว")
+    #expect(audio.count > 5000)
+    #expect(String(decoding: audio[4..<8], as: UTF8.self) == "ftyp") // MPEG-4 audio
+    client.disconnect()
 }
 
 /// App client → bridge → real CLI. Opt in with `VOXCODE_INTEGRATION=claude|codex swift test`.

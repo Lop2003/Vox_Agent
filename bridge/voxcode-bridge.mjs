@@ -14,7 +14,9 @@
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
 //   app → bridge  {"run":{"id","text","agent","activeFile"?}} | {"cancel":{}} | {"reset":{}}
-//   bridge → app  {"hello":{"workspace","agents"}}
+//                 {"speak":{"id","text"}}
+//   bridge → app  {"hello":{"workspace","agents","speech"}}
+//                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
 //                 {"event":{"id","event":{"status"|"activity"|"message"|"completed":{"_0":…}}}}
 //                 {"finished":{"id","status","error"?}}
 
@@ -256,6 +258,60 @@ export class AgentSession {
   }
 }
 
+// MARK: Speech
+
+/// Keeps one `swift tts-server.swift` process around (see that file for why it runs interpreted)
+/// and turns text into AAC audio with the Mac's neural voices.
+export class SpeechServer {
+  constructor(script = path.join(path.dirname(new URL(import.meta.url).pathname), 'tts-server.swift')) {
+    Object.assign(this, { script, child: null, nextID: 1, pending: new Map(), voices: null });
+  }
+
+  get available() { return process.platform === 'darwin' && fs.existsSync(this.script); }
+
+  start() {
+    if (this.child || !this.available) return;
+    const child = spawn('swift', [this.script], { stdio: ['pipe', 'pipe', 'ignore'] });
+    this.child = child;
+    child.stdin.on('error', () => {});
+    child.on('error', () => {}); // no Swift toolchain: speak() rejects and the app falls back to its own voice
+    readline.createInterface({ input: child.stdout }).on('line', (line) => {
+      let reply;
+      try { reply = JSON.parse(line); } catch { return; }
+      if (reply.ready) { this.voices = reply.voices; return; }
+      const job = this.pending.get(reply.id);
+      if (!job) return;
+      this.pending.delete(reply.id);
+      clearTimeout(job.timer);
+      if (reply.error) return job.reject(new Error(reply.error));
+      fs.readFile(job.out, (err, data) => {
+        fs.rm(job.out, { force: true }, () => {});
+        err ? job.reject(err) : job.resolve(data);
+      });
+    });
+    child.on('exit', () => {
+      if (this.child === child) this.child = null;
+      for (const job of this.pending.values()) job.reject(new Error('Speech server stopped'));
+      this.pending.clear();
+    });
+  }
+
+  speak(text) {
+    this.start();
+    if (!this.child) return Promise.reject(new Error('Speech is not available on this machine'));
+    const id = this.nextID++;
+    const out = path.join(os.tmpdir(), `voxagent-tts-${process.pid}-${id}.m4a`);
+    return new Promise((resolve, reject) => {
+      // The first request also waits for the interpreter to start (~2 s).
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('Speech timed out')); }, 20_000);
+      this.pending.set(id, { resolve, reject, out, timer });
+      this.child.stdin.write(JSON.stringify({ id, text, out }) + '\n');
+    });
+  }
+
+  stop() { this.child?.kill(); }
+}
+
 // MARK: Server
 
 function loadAgents(file) {
@@ -315,6 +371,8 @@ function main() {
     if (message.finished) log(`■ ${message.finished.status}${message.finished.error ? ': ' + message.finished.error : ''}`);
   };
   const session = new AgentSession(workspace, agents, emit);
+  const speech = new SpeechServer();
+  speech.start(); // warm up so the first answer isn't delayed by the interpreter starting
   const psk = pskFor(code);
 
   const server = tls.createServer({
@@ -326,13 +384,21 @@ function main() {
     socket.setKeepAlive(true, 10_000);
     clients.add(socket);
     log(`App connected: ${socket.remoteAddress}`);
-    socket.write(JSON.stringify({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name) } }) + '\n');
+    const send = (message) => socket.write(JSON.stringify(message) + '\n');
+    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available } });
     readline.createInterface({ input: socket }).on('line', (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }
       if (message.run) { log(`▶︎ ${message.run.agent}: ${message.run.text}`); session.run(message.run); }
       else if (message.cancel) session.cancel();
       else if (message.reset) session.reset();
+      else if (message.speak) {
+        const { id, text } = message.speak;
+        speech.speak(text).then(
+          (data) => send({ audio: { id, data: data.toString('base64') } }),
+          (err) => send({ audio: { id, error: err.message } }),
+        );
+      }
     });
     socket.on('close', () => { clients.delete(socket); log(`App disconnected: ${socket.remoteAddress}`); });
     socket.on('error', () => {});
@@ -358,7 +424,7 @@ machine's address (e.g. its Tailscale IP). Run with --new-code to revoke the cod
   });
 
   // The user didn't cancel anything: tell the app why its run ended, then exit.
-  const stop = () => { session.current?.finish('Failed', 'The bridge was stopped.'); process.exit(0); };
+  const stop = () => { session.current?.finish('Failed', 'The bridge was stopped.'); speech.stop(); process.exit(0); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   if (managed) { process.stdin.on('end', stop); process.stdin.resume(); }

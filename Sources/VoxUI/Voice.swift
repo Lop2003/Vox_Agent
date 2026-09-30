@@ -136,12 +136,18 @@ public enum VoiceCatalog {
     }
 }
 
-/// Reads agent replies aloud with AVSpeechSynthesizer, picking a Thai or English voice.
-final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {  // used from the main actor only
+/// Reads agent replies aloud. With `remote` set, sentences are voiced elsewhere (the bridge's Mac neural voices)
+/// and played here, fetched ahead so there are no gaps; any that fail are spoken with a local voice instead.
+final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate, @unchecked Sendable {  // used from the main actor only
     private let synthesizer = AVSpeechSynthesizer()
     /// Fires once everything queued has been spoken or stopped.
     var onFinish: (@MainActor () -> Void)?
     var volume: Float = 1 // tests speak silently
+    @MainActor var remote: (@MainActor (String) async throws -> Data)?
+    @MainActor private var playlist: [(text: String, audio: Task<Data?, Never>)] = []
+    @MainActor private var player: AVAudioPlayer?
+    @MainActor private var playing = false
+    @MainActor private var generation = 0 // bumped by stop() so stale fetches are ignored
     // Counted by hand: `isSpeaking` is often still true inside didFinish, so it can't tell us the queue is empty.
     @MainActor private var pending = 0
 
@@ -157,6 +163,36 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @uncheck
 
     /// Speaks after whatever is already queued.
     @MainActor func enqueue(_ text: String) throws {
+        if let remote {
+            pending += 1
+            playlist.append((text, Task { try? await remote(text) }))
+            playNext()
+            return
+        }
+        try speakLocally(text)
+    }
+
+    @MainActor private func playNext() {
+        guard !playing, !playlist.isEmpty else { return }
+        playing = true
+        let (text, audio) = playlist.removeFirst()
+        let generation = generation
+        Task { @MainActor in
+            let data = await audio.value
+            guard generation == self.generation else { return }
+            if let data, let player = try? AVAudioPlayer(data: data) {
+                player.delegate = self
+                player.volume = volume
+                self.player = player
+                if player.play() { return }
+            }
+            // Bridge speech failed for this sentence: say it locally so nothing is skipped.
+            do { try speakLocally(text, counted: true) } catch { utteranceEnded() }
+        }
+    }
+
+    /// `counted`: the sentence was already added to `pending` when it was queued for remote speech.
+    @MainActor private func speakLocally(_ text: String, counted: Bool = false) throws {
         let language = NLLanguageRecognizer.dominantLanguage(for: text) == .english ? "en-US" : "th-TH"
         guard let voice = VoiceCatalog.voice(for: language) ?? AVSpeechSynthesisVoice(language: "en-US") else {
             throw VoxError("No text-to-speech voice installed for \(language).")
@@ -164,13 +200,19 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @uncheck
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
         utterance.volume = volume
-        pending += 1
+        if !counted { pending += 1 }
         synthesizer.speak(utterance)
     }
 
     @MainActor func stop() {
         guard pending > 0 else { return }
         pending = 0 // late didCancel callbacks are ignored below
+        generation += 1
+        playlist.forEach { $0.audio.cancel() }
+        playlist = []
+        player?.stop()
+        player = nil
+        playing = false
         synthesizer.stopSpeaking(at: .immediate)
         onFinish?()
     }
@@ -178,11 +220,17 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @uncheck
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { finished() }
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { finished() }
 
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { finished() }
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) { finished() }
+
     private func finished() {
-        Task { @MainActor in
-            guard pending > 0 else { return }
-            pending -= 1
-            if pending == 0 { onFinish?() }
-        }
+        Task { @MainActor in utteranceEnded() }
+    }
+
+    @MainActor private func utteranceEnded() {
+        guard pending > 0 else { return }
+        pending -= 1
+        playing = false
+        if pending == 0 { onFinish?() } else { playNext() }
     }
 }

@@ -52,3 +52,17 @@ test('prompt and workspace context', () => {
 test('pairing code normalization matches the app', () => {
   assert.equal(normalizeCode(' abcd-efgh-jk23 '), 'ABCDEFGHJK23');
 });
+
+test('speech server turns Thai text into audio (macOS)', { skip: process.platform !== 'darwin', timeout: 60_000 }, async () => {
+  const { SpeechServer } = await import('./voxcode-bridge.mjs');
+  const speech = new SpeechServer();
+  try {
+    const [thai, english] = await Promise.all([speech.speak('สวัสดีครับ แก้ไฟล์เรียบร้อยแล้ว'), speech.speak('All tests pass.')]);
+    assert.ok(thai.length > 5000, `thai audio too small: ${thai.length}`);
+    assert.ok(english.length > 2000, `english audio too small: ${english.length}`);
+    assert.equal(thai.subarray(4, 8).toString(), 'ftyp'); // MPEG-4 container
+    assert.ok(speech.voices?.['th-TH'], 'reports the chosen Thai voice');
+  } finally {
+    speech.stop();
+  }
+});

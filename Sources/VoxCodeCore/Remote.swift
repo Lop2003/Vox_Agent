@@ -17,12 +17,22 @@ public enum ClientMessage: Codable, Equatable, Sendable {
     case run(id: UUID, text: String, agent: String, activeFile: String?)
     case cancel
     case reset
+    /// Ask the bridge to voice `text` with the Mac's neural voices.
+    case speak(id: UUID, text: String)
 }
 
 public enum ServerMessage: Codable, Equatable, Sendable {
-    case hello(workspace: String, agents: [String])
+    /// `speech` is nil from bridges that predate `speak`.
+    case hello(workspace: String, agents: [String], speech: Bool?)
+    /// AAC audio for a `speak` request (base64 in JSON), or why there is none.
+    case audio(id: UUID, data: Data?, error: String?)
     case event(id: UUID, event: AgentEvent)
     case finished(id: UUID, status: AgentStatus, error: String?)
+}
+
+public struct BridgeError: LocalizedError {
+    public let errorDescription: String?
+    public init(_ message: String) { errorDescription = message }
 }
 
 public enum PairingCode {
@@ -101,6 +111,9 @@ public final class BridgeClient: AgentRunner {
     public private(set) var state = State.disconnected
     public private(set) var macName: String?
     public private(set) var agents: [String] = []
+    /// The bridge can voice text with the Mac's (much more natural) neural voices.
+    public private(set) var canSpeak = false
+    private var speechRequests: [UUID: CheckedContinuation<Data, Error>] = [:]
 
     private var browser: NWBrowser?
     private var connection: NWConnection?
@@ -162,6 +175,8 @@ public final class BridgeClient: AgentRunner {
     }
 
     private func teardown() {
+        for request in speechRequests.values { request.resume(throwing: BridgeError("Disconnected from the agent bridge.")) }
+        speechRequests = [:]
         retryTask?.cancel()
         retryTask = nil
         browser?.cancel()
@@ -220,15 +235,36 @@ public final class BridgeClient: AgentRunner {
 
     private func handle(_ message: ServerMessage) {
         switch message {
-        case .hello(let workspace, let agents):
+        case .hello(let workspace, let agents, let speech):
             attempts = 0
             self.agents = agents
+            canSpeak = speech ?? false
             state = .connected(workspace: workspace)
         // Replies for a request that was already cancelled locally are dropped.
         case .event(let id, let event) where id == pending?.id: pending?.onEvent(event)
         case .finished(let id, let status, let error) where id == pending?.id: finishPending(status, error)
         case .event, .finished: break
+        case .audio(let id, let data, let error):
+            resolveSpeech(id, data.map { .success($0) } ?? .failure(BridgeError(error ?? "The bridge sent no audio.")))
         }
+    }
+
+    /// AAC audio of `text` spoken by the bridge's Mac voices.
+    public func synthesize(_ text: String) async throws -> Data {
+        guard isConnected, canSpeak, let connection else { throw BridgeError("Bridge speech is not available.") }
+        let id = UUID()
+        connection.sendMessage(ClientMessage.speak(id: id, text: text))
+        return try await withCheckedThrowingContinuation { continuation in
+            speechRequests[id] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(20))
+                self?.resolveSpeech(id, .failure(BridgeError("The bridge took too long to speak.")))
+            }
+        }
+    }
+
+    private func resolveSpeech(_ id: UUID, _ result: Result<Data, Error>) {
+        speechRequests.removeValue(forKey: id)?.resume(with: result)
     }
 
     private func finishPending(_ status: AgentStatus, _ error: String?) {

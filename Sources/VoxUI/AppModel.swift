@@ -57,6 +57,7 @@ public final class AppModel {
     public var thaiVoice = VoiceCatalog.preferredID(for: "th-TH") {
         didSet {
             VoiceCatalog.setPreferredID(thaiVoice, for: "th-TH")
+            prepareVoice()
             try? tts.speak("สวัสดีครับ นี่คือเสียงที่จะใช้ตอบคุณ")
             isSpeaking = true
         }
@@ -111,10 +112,24 @@ public final class AppModel {
         if inCall, phase == .idle { Task { await startListening() } }
     }
 
+    /// Automatic voice = the bridge's Mac neural voice when it offers one (far more natural than the
+    /// phone's, and the only good Thai voice in the Simulator); a specific voice = that local voice.
+    private func prepareVoice() {
+        if thaiVoice.isEmpty, let bridge = runner as? BridgeClient, bridge.canSpeak {
+            tts.remote = { [weak bridge] text in
+                guard let bridge else { throw CancellationError() }
+                return try await bridge.synthesize(text)
+            }
+        } else {
+            tts.remote = nil
+        }
+    }
+
     /// Speaks without interrupting what is already being said.
     private func say(_ text: String) {
         let text = SpeechText.strip(text)
         guard !text.isEmpty else { return }
+        prepareVoice()
         do {
             try tts.enqueue(text)
             isSpeaking = true
@@ -336,6 +351,7 @@ public final class AppModel {
     /// Reads one answer aloud, or stops it if it is the one playing.
     public func toggleSpeaking(_ turn: Turn) {
         if speakingTurn == turn.id { return tts.stop() }
+        prepareVoice()
         do {
             try tts.speak(SpeechText.speakable(from: turn.response))
             isSpeaking = true
@@ -347,6 +363,7 @@ public final class AppModel {
 
     private func speakLastResponse() {
         guard let response = lastResponse else { return }
+        prepareVoice()
         do {
             try tts.speak(SpeechText.speakable(from: response))
             isSpeaking = true

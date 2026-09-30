@@ -120,7 +120,7 @@ struct MobileView: View {
                 }
                 .pickerStyle(.menu)
                 Picker(selection: $model.thaiVoice) {
-                    Text("Automatic (most natural)").tag("")
+                    Text("Automatic (Mac voice when connected)").tag("")
                     ForEach(VoiceCatalog.options(for: "th-TH")) { Text($0.label).tag($0.id) }
                 } label: {
                     Label("Thai voice", systemImage: "waveform")
