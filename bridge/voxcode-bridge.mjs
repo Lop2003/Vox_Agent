@@ -2,7 +2,10 @@
 // Vox Agent bridge: lets the Vox Agent app run coding-agent CLIs in one workspace on this machine.
 // Runs on macOS and Linux with Node 18+, no dependencies.
 //
-// Usage: node voxcode-bridge.mjs [--workspace <dir>] [--port <n>] [--agents <file>] [--new-code]
+// Usage: node voxcode-bridge.mjs [--workspace <dir>] [--port <n>] [--host <addr>] [--agents <file>] [--new-code] [--managed]
+//
+// --host limits which address it listens on (default: all). --managed is for a parent app that owns the
+// bridge: no Bonjour, and exit as soon as the parent closes our stdin (so it never outlives the app).
 //
 // Agents come from --agents, else $VOXCODE_HOME/agents.json (default ~/.voxcode), else Claude Code + Codex.
 // Each agent drives the `claude` or `codex` CLI; Codex can also reach Ollama, OpenRouter and other
@@ -278,7 +281,7 @@ function main() {
   const argv = process.argv.slice(2);
   const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
   if (argv.includes('-h') || argv.includes('--help')) {
-    console.log('Usage: node voxcode-bridge.mjs [--workspace <dir>] [--port <n>] [--agents <file>] [--new-code]');
+    console.log('Usage: node voxcode-bridge.mjs [--workspace <dir>] [--port <n>] [--host <addr>] [--agents <file>] [--new-code] [--managed]');
     return;
   }
 
@@ -288,6 +291,8 @@ function main() {
     process.exit(1);
   }
   const port = Number(flag('--port') ?? DEFAULT_PORT);
+  const host = flag('--host');
+  const managed = argv.includes('--managed');
 
   // The pairing code is the shared secret; keep it private to this user and reuse it across runs.
   const home = process.env.VOXCODE_HOME ?? path.join(os.homedir(), '.voxcode');
@@ -336,23 +341,27 @@ function main() {
   server.on('tlsClientError', (err, socket) => log(`Rejected ${socket.remoteAddress ?? 'connection'}: ${err.code ?? err.message}`));
   server.on('error', (err) => { console.error(`Can't listen on port ${port}: ${err.message}`); process.exit(1); });
 
-  server.listen(port, () => {
+  server.listen(port, host, () => {
     const name = os.hostname().replace(/\.local$/, '');
-    advertise(name, port);
+    if (!managed) advertise(name, port);
+    // Only show the secret on an interactive terminal, never in a service log file.
+    const shownCode = process.stdout.isTTY ? code : `(in ${codeFile})`;
     console.log(`Vox Agent bridge
   Host:         ${name}
   Workspace:    ${workspace}
-  Port:         ${port}
+  Port:         ${port}${host ? ` on ${host}` : ''}
   Agents:       ${agents.map((a) => a.name).join(', ')}${agentsFile ? ` (${agentsFile})` : ''}
-  Pairing code: ${code}
+  Pairing code: ${shownCode}
 
 Enter the pairing code in the Vox Agent app. Same Wi-Fi: found automatically; otherwise type this
 machine's address (e.g. its Tailscale IP). Run with --new-code to revoke the code. Ctrl-C to stop.`);
   });
 
-  const stop = () => { session.cancel(); process.exit(0); };
+  // The user didn't cancel anything: tell the app why its run ended, then exit.
+  const stop = () => { session.current?.finish('Failed', 'The bridge was stopped.'); process.exit(0); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  if (managed) { process.stdin.on('end', stop); process.stdin.resume(); }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();

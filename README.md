@@ -5,19 +5,26 @@ Voice interface for AI coding agents (Claude Code / Codex), on iPhone and Mac.
 Mic → Speech-to-Text (Thai / English) → structured prompt → agent CLI in your workspace → response → optional Text-to-Speech.
 
 ```
-iPhone app (mic, STT, TTS, UI) ──TLS-PSK──▶ bridge (Node, on a Mac or Linux box) ──▶ claude / codex CLI in <workspace>
-Mac app    (mic, STT, TTS, UI) ───────────────────────────────────────────────────▶ claude / codex CLI in <workspace>
+iPhone app (mic, STT, TTS, UI) ──TLS-PSK──▶ bridge service (Node) ──▶ claude / codex CLI in <workspace>
+Mac app    (mic, STT, TTS, UI) ──localhost──▶ bridge it starts itself ──▶ claude / codex CLI in <chosen folder>
 ```
 
-iOS can't run the agent CLIs, so the phone talks to a small bridge ([bridge/voxcode-bridge.mjs](bridge/voxcode-bridge.mjs), Node 18+, no dependencies) on a machine that has the repo and the CLIs.
+Both apps run agents through the same bridge ([bridge/voxcode-bridge.mjs](bridge/voxcode-bridge.mjs), Node 18+, no dependencies), so there is one implementation of prompts, CLI invocation and output parsing.
 
 ## iPhone
 
-1. On the Mac or server: `node bridge/voxcode-bridge.mjs --workspace ~/path/to/project`
-   It prints a pairing code (saved in `~/.voxcode/pairing-code`; `--new-code` revokes it).
+1. On the Mac, install the bridge as a login service (starts at login, restarts if it dies):
+   ```sh
+   scripts/bridge-service.sh install ~/path/to/project   # prints the pairing code
+   scripts/bridge-service.sh status | code | logs | uninstall
+   ```
+   Or run it in a terminal: `node bridge/voxcode-bridge.mjs --workspace ~/path/to/project`.
+   The code is saved in `~/.voxcode/pairing-code` (`--new-code` revokes it) and never written to the log.
 2. Open `VoxCodeMobile/VoxCodeMobile.xcodeproj` in Xcode, pick your Team under Signing, and run on your iPhone.
 3. Enter the pairing code. On the same Wi-Fi the bridge is found automatically; otherwise type its address (e.g. a Tailscale IP).
-4. Tap the mic, speak, pause: it sends after 2 s of silence.
+4. Tap the mic, speak, pause: it sends after 2 s of silence. Or tap 〰️ for a hands-free call.
+
+The app reconnects on its own when the bridge restarts or the network drops; only a wrong pairing code needs you.
 
 **Thai speech in the iOS Simulator:** Apple's on-device Thai model is a Cryptex the Simulator can't mount, so Thai recognition breaks once it downloads ("Failed to initialize recognizer"). Run `scripts/sim-thai-stt.sh` to remove it and keep it out (recognition then uses Apple's servers); `--undo` reverts. Real iPhones don't need this.
 
@@ -35,20 +42,22 @@ open "build/Vox Agent.app"
 ```
 
 Pick a workspace folder in the toolbar, choose the agent, press the mic (⌘M). Esc cancels.
+The app starts a private bridge for that folder (localhost only, needs Node.js) and stops it when you quit;
+it reuses `~/.voxcode/agents.json`. Its log is in `~/Library/Application Support/Vox Agent/bridge/`.
 
 ## Tests
 
 ```sh
-swift test                               # unit tests + app ⇄ Node bridge tests (fake agents)
+swift test                               # unit, TTS, and app ⇄ bridge tests (fake agents: no API usage)
 node --test bridge/*.test.mjs            # bridge unit tests
 VOXCODE_INTEGRATION=claude swift test    # also real CLI round trips (or =codex)
 ```
 
-Requires macOS 14+ / iOS 17+, and `claude` and/or `codex` installed and logged in on the Mac.
+Requires macOS 14+ / iOS 17+, Node.js 18+, and `claude` and/or `codex` installed and logged in on the Mac.
 
 ## Layout
 
-- `Sources/VoxCodeCore`: agent abstraction (`CodingAgent`, `ClaudeCodeAgent`, `CodexAgent`, `AgentRouter`), `AgentRunner` with `AgentSession` (local) and `BridgeClient` (remote), `PromptBuilder`, `SpeechText`.
+- `Sources/VoxCodeCore`: `AgentRunner`, `BridgeClient` (TLS-PSK client with auto-reconnect), `LocalBridge` (Mac app's bridge process), wire format, `SpeechText`.
 - `Sources/VoxUI`: shared by both apps: `AppModel` (voice → agent → speech loop), `VoiceInputManager`, `SpeechToTextService`, `TextToSpeechService`, views.
 - `Sources/VoxCode`: macOS app. `bridge/`: Node bridge. `VoxCodeMobile/`: iOS app.
 

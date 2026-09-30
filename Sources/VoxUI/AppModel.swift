@@ -39,7 +39,7 @@ public final class AppModel {
         set { storedAgent = newValue }
     }
     public var agents: [String] { runner?.agents ?? [] }
-    private var storedAgent = UserDefaults.standard.string(forKey: "agent") ?? AgentKind.claudeCode.rawValue {
+    private var storedAgent = UserDefaults.standard.string(forKey: "agent") ?? "Claude Code" {
         didSet { UserDefaults.standard.set(storedAgent, forKey: "agent") }
     }
     public var localeID = UserDefaults.standard.string(forKey: "locale") ?? "th-TH" {

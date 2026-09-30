@@ -6,6 +6,8 @@ import VoxUI
 struct ContentView: View {
     @State private var model = AppModel()
     @State private var workspace = WorkspaceManager.load()
+    @State private var bridge = BridgeClient()
+    @State private var localBridge: LocalBridge?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,7 +24,36 @@ struct ContentView: View {
         .navigationTitle("Vox Agent")
         .onAppear {
             model.runnerMissingMessage = "Choose a workspace folder first."
-            model.runner = workspace.map { AgentSession(workspace: $0) }
+            if let workspace { startBridge(in: workspace) }
+        }
+    }
+
+    /// Agents run through the same Node bridge the iPhone uses, started here for this workspace (localhost only).
+    private func startBridge(in workspace: URL) {
+        localBridge?.stop()
+        localBridge = nil
+        bridge.disconnect()
+        guard let script = LocalBridge.bundledScript else {
+            model.errorMessage = "The agent bridge is missing from the app. Rebuild it with scripts/build-app.sh."
+            return
+        }
+        let home = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Vox Agent/bridge")
+        // Reuse the agents configured for the iPhone bridge, if any.
+        let agents = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voxcode/agents.json")
+        do {
+            let local = try LocalBridge(script: script, workspace: workspace, home: home,
+                                        agentsFile: FileManager.default.fileExists(atPath: agents.path) ? agents : nil)
+            local.onExit = { [model] status in
+                model.errorMessage = status == 127
+                    ? "Node.js not found. Install it (brew install node), then choose the workspace again."
+                    : "The agent bridge stopped (exit \(status)). Log: \(home.appendingPathComponent("bridge.log").path)"
+            }
+            localBridge = local
+            model.runner = bridge
+            bridge.connect(pairingCode: local.pairingCode, host: "127.0.0.1", port: local.port)
+        } catch {
+            model.errorMessage = "Couldn't start the agent bridge: \(error.localizedDescription)"
         }
     }
 
@@ -35,7 +66,7 @@ struct ContentView: View {
         model.newConversation()
         workspace = url
         WorkspaceManager.save(url)
-        model.runner = AgentSession(workspace: url)
+        startBridge(in: url)
     }
 
     // MARK: Toolbar
@@ -54,8 +85,8 @@ struct ContentView: View {
             Picker("Agent", selection: $model.agent) {
                 ForEach(model.agents, id: \.self) { Text($0).tag($0) }
             }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
+            .pickerStyle(.menu)
+            .fixedSize()
             .disabled(model.phase == .running)
         }
         ToolbarItem(placement: .primaryAction) {

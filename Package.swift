@@ -16,6 +16,7 @@ let package = Package(
         // macOS app.
         .executableTarget(name: "VoxCode", dependencies: ["VoxUI", "VoxCodeCore"]),
         .testTarget(name: "VoxCodeCoreTests", dependencies: ["VoxCodeCore"]),
+        .testTarget(name: "VoxUITests", dependencies: ["VoxUI"]),
     ],
     swiftLanguageModes: [.v5]
 )

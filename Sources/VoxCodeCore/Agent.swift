@@ -1,19 +1,5 @@
 import Foundation
 
-public enum AgentKind: String, CaseIterable, Identifiable, Codable, Sendable {
-    case claudeCode = "Claude Code"
-    case codex = "Codex"
-
-    public var id: String { rawValue }
-
-    var executable: String {
-        switch self {
-        case .claudeCode: "claude"
-        case .codex: "codex"
-        }
-    }
-}
-
 public enum AgentStatus: String, Codable, Sendable {
     case idle = "Idle"
     case analyzing = "Analyzing"
@@ -25,16 +11,9 @@ public enum AgentStatus: String, Codable, Sendable {
 
     /// The happy-path steps shown in the status bar.
     public static let pipeline: [AgentStatus] = [.analyzing, .editing, .testing, .completed]
-
-    /// Best guess at what a shell command is doing.
-    static func forCommand(_ command: String) -> AgentStatus {
-        let c = command.lowercased()
-        let checks = ["test", "build", "lint", "xcodebuild", "pytest", "jest", "vitest", "tsc", "cargo check", "go vet"]
-        return checks.contains { c.contains($0) } ? .testing : .analyzing
-    }
 }
 
-/// Normalized events every backend is translated into, so the UI never sees backend-specific JSON.
+/// Normalized agent events (produced by the bridge), so the UI never sees backend-specific JSON.
 public enum AgentEvent: Equatable, Codable, Sendable {
     case session(String)
     case status(AgentStatus)
@@ -45,35 +24,8 @@ public enum AgentEvent: Equatable, Codable, Sendable {
     case failed(String)
 }
 
-/// A coding-agent CLI backend. Adapters only describe how to invoke the CLI and how to read its output.
-public protocol CodingAgent: Sendable {
-    var kind: AgentKind { get }
-    func arguments(prompt: String, workspace: URL, sessionID: String?) -> [String]
-    func parse(_ line: String) -> [AgentEvent]
-}
-
-#if os(macOS)
-extension CodingAgent {
-    public func run(prompt: String, workspace: URL, sessionID: String?) -> AsyncThrowingStream<AgentEvent, Error> {
-        let lines = ProcessLines.run(kind.executable, arguments(prompt: prompt, workspace: workspace, sessionID: sessionID), cwd: workspace)
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    for try await line in lines {
-                        for event in parse(line) { continuation.yield(event) }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-}
-#endif
-
-/// Runs voice requests against some agent: in-process on the Mac (`AgentSession`) or through the bridge (`BridgeClient`).
+/// Runs voice requests against some agent. Today that is always the Node bridge via `BridgeClient`
+/// (on the Mac through `LocalBridge`); tests can plug in fakes.
 /// `onFinish` fires exactly once per `run`, after the last `onEvent`.
 @MainActor
 public protocol AgentRunner: AnyObject {
@@ -85,23 +37,4 @@ public protocol AgentRunner: AnyObject {
     func cancel()
     /// Forget agent sessions so the next request starts a new conversation.
     func reset()
-}
-
-public enum AgentRouter {
-    public static func agent(for kind: AgentKind) -> any CodingAgent {
-        switch kind {
-        case .claudeCode: ClaudeCodeAgent()
-        case .codex: CodexAgent()
-        }
-    }
-}
-
-func json(_ line: String) -> [String: Any]? {
-    guard let data = line.data(using: .utf8) else { return nil }
-    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-}
-
-func truncate(_ s: String, _ max: Int = 120) -> String {
-    let oneLine = s.replacingOccurrences(of: "\n", with: " ")
-    return oneLine.count > max ? String(oneLine.prefix(max)) + "…" : oneLine
 }

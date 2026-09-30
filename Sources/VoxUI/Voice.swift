@@ -141,6 +141,7 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @uncheck
     private let synthesizer = AVSpeechSynthesizer()
     /// Fires once everything queued has been spoken or stopped.
     var onFinish: (@MainActor () -> Void)?
+    var volume: Float = 1 // tests speak silently
     // Counted by hand: `isSpeaking` is often still true inside didFinish, so it can't tell us the queue is empty.
     @MainActor private var pending = 0
 
@@ -162,6 +163,7 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, @uncheck
         }
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
+        utterance.volume = volume
         pending += 1
         synthesizer.speak(utterance)
     }

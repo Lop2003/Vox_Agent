@@ -66,7 +66,7 @@ struct MobileView: View {
     private func reconnect() {
         guard let code = PairingStore.code else { return }
         switch bridge.state {
-        case .disconnected, .failed: bridge.connect(pairingCode: code, host: PairingStore.host)
+        case .disconnected, .failed, .waiting: bridge.connect(pairingCode: code, host: PairingStore.host)
         case .searching, .connecting, .connected: break
         }
     }
@@ -143,6 +143,7 @@ struct MobileView: View {
         case .searching: "Searching…"
         case .connecting: "Connecting…"
         case .connected(let workspace): workspace
+        case .waiting: "Reconnecting…"
         case .failed: "Can't connect — tap to fix"
         }
     }
@@ -152,7 +153,7 @@ struct MobileView: View {
         case .connected: .green
         case .failed: .red
         case .disconnected: .gray
-        case .searching, .connecting: .orange
+        case .searching, .connecting, .waiting: .orange
         }
     }
 }

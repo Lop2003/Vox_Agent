@@ -13,6 +13,8 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 # Package resources (in-app logo); Bundle.module looks in Contents/Resources.
 cp -R "$(swift build -c release --show-bin-path)/VoxCode_VoxUI.bundle" "$APP/Contents/Resources/"
+# The Node bridge the app runs for the chosen workspace (see LocalBridge.swift).
+cp bridge/voxcode-bridge.mjs "$APP/Contents/Resources/"
 # App icon from the generated 1024px master (see scripts/make-icons.swift).
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
