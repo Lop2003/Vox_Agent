@@ -10,6 +10,7 @@ struct VoxError: LocalizedError {
 /// Owns the microphone: permissions and AVAudioEngine capture.
 final class VoiceInputManager {
     private let engine = AVAudioEngine()
+    var echoCancellation = false
 
     static func requestPermissions() async throws {
         let micGranted: Bool
@@ -35,6 +36,13 @@ final class VoiceInputManager {
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         #endif
         let input = engine.inputNode
+        // Echo cancellation lets the mic stay open while the answer plays (to hear "หยุด") without hearing
+        // the app's own voice. Must be set before reading the format: it changes the input format.
+        if input.isVoiceProcessingEnabled != echoCancellation { try? input.setVoiceProcessingEnabled(echoCancellation) }
+        if echoCancellation {
+            // By default voice processing ducks all other audio, which would make our own TTS nearly silent.
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else { throw VoxError("No microphone available.") }
         input.removeTap(onBus: 0)

@@ -82,3 +82,50 @@ struct ChatHistoryTests {
         #expect(store.load().first?.turns.first?.status == .cancelled)
     }
 }
+
+/// Streams an answer the way a local model does: the same message growing, then done.
+@MainActor
+private final class StreamingRunner: AgentRunner {
+    var agents = ["Local"]
+    let pieces: [String]
+    init(_ pieces: [String]) { self.pieces = pieces }
+    func run(_ text: String, agent: String, activeFile: String?, language: String?,
+             onEvent: @escaping @MainActor (AgentEvent) -> Void,
+             onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
+        var answer = ""
+        for piece in pieces {
+            answer += piece
+            onEvent(.message(answer))
+        }
+        onEvent(.completed(answer))
+        onFinish(.completed, nil)
+    }
+    func cancel() {}
+    func reset() {}
+}
+
+@MainActor
+struct StreamingSpeechTests {
+    @Test func speaksEachSentenceAsItArrivesAndOnlyOnce() {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.tts.volume = 0
+        model.autoSpeak = true
+        defer { model.autoSpeak = false; model.cancel() }
+        model.runner = StreamingRunner(["## Sum", "mary\n", "สวัสดีครับ. ", "วันนี้ให้ช่วย", "อะไรดี"])
+        model.transcript = "hi"
+        model.send()
+        #expect(model.spokenLog == ["สวัสดีครับ.", "วันนี้ให้ช่วยอะไรดี"]) // no "Summary", no repeats
+        #expect(model.turns.last?.response == "## Summary\nสวัสดีครับ. วันนี้ให้ช่วยอะไรดี")
+    }
+
+    @Test func wholeMessagesAreSpokenAtTheEndAsBefore() {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.tts.volume = 0
+        model.autoSpeak = true
+        defer { model.autoSpeak = false; model.cancel() }
+        model.runner = FakeRunner() // one complete message (Claude Code style)
+        model.transcript = "hello"
+        model.send()
+        #expect(model.spokenLog == ["answer to hello"])
+    }
+}

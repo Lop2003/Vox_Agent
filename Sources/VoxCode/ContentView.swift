@@ -159,6 +159,7 @@ struct ContentView: View {
                 .fixedSize()
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Speak responses", isOn: $model.autoSpeak)
+                Toggle("Interrupt by voice", isOn: $model.bargeInEnabled)
                 Spacer()
                 TextField("Active file (optional)", text: $model.activeFile)
                     .textFieldStyle(.roundedBorder)

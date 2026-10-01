@@ -168,6 +168,7 @@ struct MobileView: View {
                 Divider()
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Read answers aloud", isOn: $model.autoSpeak)
+                Toggle("Interrupt by voice (calls)", isOn: $model.bargeInEnabled)
                 Divider()
                 Button("Pair…", systemImage: "link") { showPairing = true }
             } label: {

@@ -63,11 +63,20 @@ public final class AppModel {
         }
     }
 
-    let silenceTimeout: Duration = .seconds(2)
+    /// Fallback end-of-turn wait after the last recognized word (the level detector usually ends it sooner).
+    let silenceTimeout: Duration = .milliseconds(2000)
+
+    /// In a call, keep the mic open while answering so saying "หยุด" (or anything) cuts in. Uses echo
+    /// cancellation plus an echo check; turn off if the app interrupts itself through loud speakers.
+    public var bargeInEnabled = UserDefaults.standard.object(forKey: "bargeIn") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(bargeInEnabled, forKey: "bargeIn") }
+    }
 
     private let voice = VoiceInputManager()
     private let stt = SpeechToTextService()
-    private let tts = TextToSpeechService()
+    let tts = TextToSpeechService() // internal: tests mute it
+    /// Everything handed to speech, newest last (tests; capped).
+    private(set) var spokenLog: [String] = []
     private var silenceTask: Task<Void, Never>?
     private var sendAfterTranscribing = false
     private var isStartingToListen = false
@@ -76,6 +85,17 @@ public final class AppModel {
     public private(set) var speakingTurn: UUID?
     /// Latest agent sentence in call mode, spoken once the agent moves on to its next step.
     private var narration: String?
+    private var micOpen = false
+    /// Mic open during our own speech, only to notice the user cutting in.
+    private var bargeInListening = false
+    /// Characters of the recognizer's text that were our own echo, not the user.
+    private var heardOffset = 0
+    private var vad = EndOfTurnDetector()
+    /// What we said recently, to recognize it if the mic picks it up.
+    private var recentSpeech = ""
+    /// The answer is arriving token by token (local models): speak it sentence by sentence as it comes.
+    private var streamingAnswer = false
+    private var spokenCharacters = 0
 
     /// Saved chats, newest first (includes the current one once it has a turn).
     public private(set) var conversations: [Conversation]
@@ -116,7 +136,8 @@ public final class AppModel {
     private func speechFinished() {
         isSpeaking = false
         speakingTurn = nil
-        if inCall, phase == .idle { Task { await startListening() } }
+        guard inCall, phase == .idle else { return }
+        if bargeInListening { beginTurn() } else { Task { await startListening() } }
     }
 
     /// Automatic voice = the bridge's Mac neural voice when it offers one (far more natural than the
@@ -137,13 +158,30 @@ public final class AppModel {
         let text = SpeechText.strip(text)
         guard !text.isEmpty else { return }
         prepareVoice()
+        recentSpeech = String((recentSpeech + " " + text).suffix(400))
+        spokenLog = Array((spokenLog + [text]).suffix(50))
         do {
             try tts.enqueue(text)
             isSpeaking = true
         } catch {
             errorMessage = error.localizedDescription
         }
+        if inCall, bargeInEnabled, !micOpen { Task { await startListening(bargeIn: true) } }
     }
+
+    /// Speaks the parts of a still-growing answer that are complete sentences (all of it when `final`).
+    private func speakStream(_ response: String, final: Bool) {
+        // A heading still being typed ("## Sum") would be read as words; wait for its line to finish.
+        if response.hasPrefix("#"), !response.contains("\n") { return }
+        let speakable = SpeechText.speakable(from: response)
+        while let (chunk, end) = SpeechChunker.next(in: speakable, after: spokenCharacters, final: final) {
+            spokenCharacters = end
+            if !chunk.isEmpty { say(chunk) }
+            if final { break }
+        }
+    }
+
+    private var speaksAnswers: Bool { inCall || autoSpeak }
 
     private func sayNarration() {
         if let narration { say(narration) }
@@ -170,34 +208,73 @@ public final class AppModel {
         }
     }
 
-    private func startListening() async {
-        guard phase == .idle, !isStartingToListen else { return }
+    /// - Parameter bargeIn: open the mic *while* the answer plays (call mode) only to catch the user cutting in.
+    ///   The phase is left alone until real, non-echo words are heard.
+    private func startListening(bargeIn: Bool = false) async {
+        if micOpen {
+            if !bargeIn, bargeInListening { // already listening for interruptions: it's the user's turn now
+                tts.stop()
+                beginTurn()
+            }
+            return
+        }
+        guard !isStartingToListen, bargeIn ? (phase == .idle || phase == .running) : phase == .idle else { return }
         isStartingToListen = true
         defer { isStartingToListen = false }
-        errorMessage = nil
-        tts.stop() // lets the user cut in while the answer is being read
+        if !bargeIn {
+            errorMessage = nil
+            tts.stop() // lets the user cut in while the answer is being read
+        }
         do {
             try await VoiceInputManager.requestPermissions()
             transcript = ""
+            heardOffset = 0
             sendAfterTranscribing = shouldSend // if the recognizer ends the session on its own
             let sink = try stt.start(
                 localeID: localeID,
                 onText: { [weak self] text, isFinal in self?.received(text, isFinal: isFinal) },
                 onError: { [weak self] error in self?.recognitionFailed(error) }
             )
-            try voice.start(onBuffer: sink)
-            phase = .listening
+            voice.echoCancellation = inCall && bargeInEnabled
+            try voice.start { [weak self] buffer in
+                sink(buffer)
+                let level = EndOfTurnDetector.level(of: buffer)
+                Task { @MainActor in self?.heard(level: level) }
+            }
+            micOpen = true
+            if bargeIn { bargeInListening = true } else { beginTurn() }
         } catch {
             stt.cancel()
+            guard !bargeIn else { return } // interruptions are a bonus; the normal turn still follows
             inCall = false
             errorMessage = error.localizedDescription
         }
     }
 
+    /// The mic is now taking the user's turn (possibly converted from watching for interruptions).
+    private func beginTurn() {
+        bargeInListening = false
+        vad = EndOfTurnDetector()
+        sendAfterTranscribing = shouldSend
+        phase = .listening
+    }
+
+    private func closeMic() {
+        voice.stop()
+        micOpen = false
+        bargeInListening = false
+    }
+
+    /// Voice activity: end the turn as soon as the user pauses instead of waiting for the recognizer.
+    private func heard(level: Float) {
+        guard micOpen, phase == .listening else { return }
+        if vad.feed(level) == .endOfTurn, !transcript.isEmpty { stopListening(send: shouldSend) }
+    }
+
     public func stopListening(send: Bool) {
         guard phase == .listening else { return }
         silenceTask?.cancel()
-        voice.stop()
+        closeMic()
         stt.finish()
         sendAfterTranscribing = send
         phase = .transcribing
@@ -209,25 +286,50 @@ public final class AppModel {
     }
 
     private func received(_ text: String, isFinal: Bool) {
+        if bargeInListening {
+            // Watching for an interruption while the answer plays. The recognizer keeps everything it heard,
+            // so only judge what came after the last echo.
+            let new = String(text.dropFirst(heardOffset))
+            if isFinal || EchoGuard.isEcho(new, of: recentSpeech) {
+                heardOffset = text.count
+                if isFinal { restartBargeIn() } // the recognizer ended its session; keep watching
+                return
+            }
+            // Real words over our own voice: stop talking (and the agent, if it's still writing) and listen.
+            tts.stop()
+            if phase == .running { runner?.cancel() }
+            beginTurn()
+        }
         guard phase == .listening || phase == .transcribing else { return }
         recognitionFailures = 0
-        transcript = text
+        transcript = String(text.dropFirst(heardOffset)).trimmingCharacters(in: .whitespaces)
         if isFinal {
-            if phase == .listening { voice.stop() }
+            if phase == .listening { closeMic() }
             transcriptionDone()
         } else if phase == .listening {
-            // Auto-stop once the user pauses.
+            // Fallback end of turn in case the level detector misses it (e.g. a quiet voice it never heard start).
             silenceTask?.cancel()
-            silenceTask = Task { [weak self, silenceTimeout] in
-                try? await Task.sleep(for: silenceTimeout)
+            silenceTask = Task { [weak self] in
+                try? await Task.sleep(for: self?.silenceTimeout ?? .seconds(2))
                 if !Task.isCancelled { self?.stopListening(send: self?.shouldSend ?? false) }
             }
         }
     }
 
+    private func restartBargeIn() {
+        closeMic()
+        stt.cancel()
+        if inCall, isSpeaking || phase == .running { Task { await startListening(bargeIn: true) } }
+    }
+
     private func recognitionFailed(_ error: Error) {
+        if bargeInListening { // watching for interruptions is best effort: stop quietly
+            closeMic()
+            stt.cancel()
+            return
+        }
         guard phase == .listening || phase == .transcribing else { return }
-        voice.stop()
+        closeMic()
         if transcript.isEmpty {
             silenceTask?.cancel()
             stt.cancel()
@@ -275,6 +377,8 @@ public final class AppModel {
         let kind = agent
         turns.append(Turn(user: text, agent: kind))
         let turnID = turns[turns.count - 1].id
+        streamingAnswer = false
+        spokenCharacters = 0
         persist()
         transcript = ""
         phase = .running
@@ -298,8 +402,15 @@ public final class AppModel {
             if inCall { sayNarration() }
             turns[i].activity.append(line)
         case .message(let text):
-            if inCall { narration = text }
+            let previous = turns[i].response
             turns[i].response = text
+            guard speaksAnswers else { break }
+            // The same message growing = a model streaming tokens; separate messages = agent narration.
+            if !previous.isEmpty, text.count > previous.count, text.hasPrefix(previous) {
+                streamingAnswer = true
+                narration = nil
+            }
+            if streamingAnswer { speakStream(text, final: false) } else if inCall { narration = text }
         case .completed(let text) where !text.isEmpty: turns[i].response = text
         case .completed, .session, .failed: break // session and final status are the runner's job
         }
@@ -313,6 +424,13 @@ public final class AppModel {
         guard turns[i].id == turns.last?.id, phase == .running else { return }
         phase = .idle
         narration = nil // the last message is the answer itself
+        let streamed = streamingAnswer
+        streamingAnswer = false
+        if streamed, status == .completed, speaksAnswers {
+            speakStream(turns[i].response, final: true) // the rest; earlier sentences were spoken as they arrived
+            if inCall, !isSpeaking { Task { await startListening() } }
+            return
+        }
         if inCall {
             switch status {
             case .completed: say(SpeechText.speakable(from: turns[i].response))
@@ -329,10 +447,13 @@ public final class AppModel {
     public func cancel() {
         inCall = false
         narration = nil
+        if micOpen {
+            closeMic()
+            stt.cancel()
+        }
         switch phase {
         case .listening, .transcribing:
             silenceTask?.cancel()
-            voice.stop()
             stt.cancel()
             phase = .idle
         case .running:
@@ -399,8 +520,10 @@ public final class AppModel {
     private func speakLastResponse() {
         guard let response = lastResponse else { return }
         prepareVoice()
+        let text = SpeechText.speakable(from: response)
+        spokenLog = Array((spokenLog + [text]).suffix(50))
         do {
-            try tts.speak(SpeechText.speakable(from: response))
+            try tts.speak(text)
             isSpeaking = true
         } catch {
             errorMessage = error.localizedDescription
