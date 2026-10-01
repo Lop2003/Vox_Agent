@@ -8,7 +8,7 @@ import VoxCodeCore
 private final class FakeRunner: AgentRunner {
     var agents = ["Fake"]
     var resets = 0
-    func run(_ text: String, agent: String, activeFile: String?,
+    func run(_ text: String, agent: String, activeFile: String?, language: String?,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
              onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
         onEvent(.message("## Summary\nanswer to \(text)"))

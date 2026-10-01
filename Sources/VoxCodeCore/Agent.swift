@@ -31,7 +31,7 @@ public enum AgentEvent: Equatable, Codable, Sendable {
 public protocol AgentRunner: AnyObject {
     /// Agent names the user can pick from, e.g. ["Claude Code", "Codex"].
     var agents: [String] { get }
-    func run(_ text: String, agent: String, activeFile: String?,
+    func run(_ text: String, agent: String, activeFile: String?, language: String?,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
              onFinish: @escaping @MainActor (AgentStatus, String?) -> Void)
     func cancel()

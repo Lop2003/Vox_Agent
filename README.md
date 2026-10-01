@@ -32,7 +32,12 @@ The link is TLS 1.2 with a pre-shared key derived from the pairing code: encrypt
 
 ### Agents and models
 
-By default the bridge offers Claude Code and Codex. Put a list in `~/.voxcode/agents.json` (or pass `--agents <file>`) to add cheaper models: extra `claude` args (e.g. `--model haiku`), or Codex pointed at any OpenAI-compatible provider such as OpenRouter or Ollama. See [bridge/agents.example.json](bridge/agents.example.json). Codex agents must use only `-c`/`-m` args so follow-ups (`codex exec resume`) keep working.
+By default the bridge offers Claude Code and Codex. Put a list in `~/.voxcode/agents.json` (or pass `--agents <file>`) to add others; see [bridge/agents.example.json](bridge/agents.example.json):
+- `"cli": "claude"` with extra args, e.g. `["--model", "haiku"]` for a cheaper Claude.
+- `"cli": "codex"` pointed at an OpenAI-compatible provider such as OpenRouter. Use only `-c`/`-m` args so follow-ups (`codex exec resume`) keep working.
+- `"cli": "ollama", "model": "qwen3:8b"` chats with a local model directly (streams, answers in the app's language). It can't read or edit files: small models driven through Codex ignore the reply language and invent results, so this mode tells the user to switch to Claude Code for real code work.
+
+Answers come back in the app's speech language (Thai by default); the bridge states it at the start and end of every prompt.
 
 ## Mac app
 

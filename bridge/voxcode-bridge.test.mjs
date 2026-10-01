@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildPrompt, codexArgs, describeWorkspace, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS } from './voxcode-bridge.mjs';
+import { buildPrompt, replyLanguageRule, codexArgs, describeWorkspace, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS } from './voxcode-bridge.mjs';
 
 test('claude stream-json parsing', () => {
   assert.deepEqual(parseClaude('{"type":"system","subtype":"init","session_id":"s1"}'), [{ session: { _0: 's1' } }]);
@@ -46,6 +46,12 @@ test('prompt and workspace context', () => {
   assert.ok(prompt.includes('> ช่วยดู login'));
   assert.ok(prompt.includes('## Selected agent\nCodex'));
   for (const s of RESPONSE_SECTIONS) assert.ok(prompt.includes('## ' + s));
+  assert.ok(prompt.includes('Reply in the language of the user request.')); // no language sent
+  const thai = buildPrompt({ text: 'ช่วยดู login', workspace: dir, activeFile: null, agent: 'Codex', isFollowUp: false, language: 'th-TH' });
+  const rule = 'Reply in Thai (ตอบเป็นภาษาไทย). Keep code, commands, file names and technical terms in English.';
+  assert.ok(thai.split('\n')[1] === rule, 'rule right after the title');
+  assert.ok(thai.endsWith(rule), 'and as the very last line');
+  assert.equal(replyLanguageRule('en-US'), 'Reply in English.');
   fs.rmSync(dir, { recursive: true });
 });
 
@@ -64,5 +70,79 @@ test('speech server turns Thai text into audio (macOS)', { skip: process.platfor
     assert.ok(speech.voices?.['th-TH'], 'reports the chosen Thai voice');
   } finally {
     speech.stop();
+  }
+});
+
+test('ollama chat agent streams the answer and remembers the chat', async () => {
+  const http = await import('node:http');
+  const { AgentSession, chatSystemPrompt } = await import('./voxcode-bridge.mjs');
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => (body += d)).on('end', () => {
+      requests.push(JSON.parse(body));
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      for (const piece of ['## Summary\n', 'สวัสดี', 'ครับ']) res.write(JSON.stringify({ message: { content: piece }, done: false }) + '\n');
+      res.end(JSON.stringify({ message: { content: '' }, done: true }) + '\n');
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const host = `http://127.0.0.1:${server.address().port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vox-'));
+  const events = [];
+  const session = new AgentSession(dir, [{ name: 'Local', cli: 'ollama', model: 'qwen3:8b', host }], (m) => events.push(m));
+  const finished = () => new Promise((resolve) => {
+    const check = () => (events.some((m) => m.finished) ? resolve(events.find((m) => m.finished).finished) : setTimeout(check, 20));
+    check();
+  });
+  try {
+    session.run({ id: 'a', text: 'ช่วยอธิบายโปรเจกต์', agent: 'Local', language: 'th-TH' });
+    assert.equal((await finished()).status, 'Completed');
+    const completed = events.find((m) => m.event?.event.completed)?.event.event.completed._0;
+    assert.equal(completed, '## Summary\nสวัสดีครับ');
+    assert.equal(requests[0].model, 'qwen3:8b');
+    assert.equal(requests[0].think, false);
+    assert.equal(requests[0].messages[0].role, 'system');
+    assert.ok(requests[0].messages[0].content.includes('ตอบเป็นภาษาไทยเสมอ'));
+
+    events.length = 0;
+    session.run({ id: 'b', text: 'ต่อ', agent: 'Local', language: 'th-TH' });
+    await finished();
+    assert.deepEqual(requests[1].messages.map((m) => m.role), ['system', 'user', 'assistant', 'user']); // follow-up keeps context
+
+    session.reset();
+    events.length = 0;
+    session.run({ id: 'c', text: 'ใหม่', agent: 'Local', language: 'th-TH' });
+    await finished();
+    assert.equal(requests[2].messages.length, 2); // new conversation forgets
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true });
+  }
+  assert.ok(chatSystemPrompt(os.tmpdir(), 'en-US').startsWith('You are Vox Agent'));
+});
+
+test('cancelling an ollama chat stops it cleanly', async () => {
+  const http = await import('node:http');
+  const { AgentSession } = await import('./voxcode-bridge.mjs');
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+    res.write(JSON.stringify({ message: { content: 'เริ่ม' }, done: false }) + '\n'); // then never finishes
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vox-'));
+  const events = [];
+  const session = new AgentSession(dir, [{ name: 'Local', cli: 'ollama', model: 'm', host: `http://127.0.0.1:${server.address().port}` }], (m) => events.push(m));
+  try {
+    session.run({ id: 'a', text: 'x', agent: 'Local' });
+    await new Promise((r) => setTimeout(r, 200));
+    session.cancel();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(events.filter((m) => m.finished).map((m) => m.finished.status), ['Cancelled']);
+    assert.equal(session.current, null);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    fs.rmSync(dir, { recursive: true });
   }
 });

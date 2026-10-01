@@ -11,13 +11,5 @@
       "-m", "qwen/qwen3-coder"
     ]
   },
-  {
-    "name": "Local (Ollama on Mac)",
-    "cli": "codex",
-    "args": [
-      "-c", "model_providers.macollama={ name = \"Ollama\", base_url = \"http://MAC_TAILSCALE_IP:11434/v1\" }",
-      "-c", "model_provider=\"macollama\"",
-      "-m", "qwen3:8b"
-    ]
-  }
+  { "name": "Qwen3 8B (local chat)", "cli": "ollama", "model": "qwen3:8b" }
 ]

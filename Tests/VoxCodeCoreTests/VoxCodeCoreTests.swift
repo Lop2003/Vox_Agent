@@ -40,8 +40,8 @@ import Testing
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     func json(_ value: some Encodable) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
 
-    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil))
-        == #"{"run":{"agent":"Codex","id":"00000000-0000-0000-0000-000000000001","text":"hi"}}"#)
+    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH"))
+        == #"{"run":{"agent":"Codex","id":"00000000-0000-0000-0000-000000000001","language":"th-TH","text":"hi"}}"#)
     #expect(try json(ClientMessage.cancel) == #"{"cancel":{}}"#)
 
     let decode = { (s: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(s.utf8)) }
@@ -129,7 +129,7 @@ func bridgePairingRunAndCancel() async throws {
 
     var events: [AgentEvent] = []
     var result: (AgentStatus, String?)?
-    client.run("ping", agent: "Fast", activeFile: nil, onEvent: { events.append($0) }, onFinish: { result = ($0, $1) })
+    client.run("ping", agent: "Fast", activeFile: nil, language: nil, onEvent: { events.append($0) }, onFinish: { result = ($0, $1) })
     await waitFor { result != nil }
     #expect(result?.0 == .completed)
     #expect(events.contains(.message("ดูโค้ดก่อน")))
@@ -138,7 +138,7 @@ func bridgePairingRunAndCancel() async throws {
 
     // Cancelling finishes locally at once; the bridge's late reply is dropped by request id.
     var finished: [AgentStatus] = []
-    client.run("wait", agent: "Slow", activeFile: nil, onEvent: { _ in }, onFinish: { status, _ in finished.append(status) })
+    client.run("wait", agent: "Slow", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { status, _ in finished.append(status) })
     try await Task.sleep(for: .milliseconds(300))
     client.cancel()
     try await Task.sleep(for: .milliseconds(300))
@@ -146,13 +146,13 @@ func bridgePairingRunAndCancel() async throws {
 
     // The bridge is free again after the cancel.
     result = nil
-    client.run("again", agent: "Fast", activeFile: nil, onEvent: { _ in }, onFinish: { result = ($0, $1) })
+    client.run("again", agent: "Fast", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { result = ($0, $1) })
     await waitFor { result != nil }
     #expect(result?.0 == .completed)
 
     // Unknown agents fail cleanly.
     result = nil
-    client.run("x", agent: "Nope", activeFile: nil, onEvent: { _ in }, onFinish: { result = ($0, $1) })
+    client.run("x", agent: "Nope", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { result = ($0, $1) })
     await waitFor { result != nil }
     #expect(result?.0 == .failed)
     client.disconnect()
@@ -173,7 +173,7 @@ func clientReconnectsWhenBridgeRestarts() async throws {
 
     // A run in flight when the bridge dies fails instead of hanging forever.
     var result: AgentStatus?
-    client.run("x", agent: "Slow", activeFile: nil, onEvent: { _ in }, onFinish: { status, _ in result = status })
+    client.run("x", agent: "Slow", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { status, _ in result = status })
     try await Task.sleep(for: .milliseconds(200))
     bridge.stop()
     await waitFor { if case .waiting = client.state { true } else { false } }
@@ -242,7 +242,7 @@ func bridgeRealAgent() async throws {
 
     var messages: [String] = []
     var result: AgentStatus?
-    client.run("Reply with exactly: pong", agent: agent, activeFile: nil,
+    client.run("Reply with exactly: pong", agent: agent, activeFile: nil, language: nil,
                onEvent: { if case .message(let t) = $0 { messages.append(t) } },
                onFinish: { status, _ in result = status })
     for _ in 0..<1200 where result == nil { try await Task.sleep(for: .milliseconds(100)) }

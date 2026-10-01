@@ -193,7 +193,7 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, AVAudioP
 
     /// `counted`: the sentence was already added to `pending` when it was queued for remote speech.
     @MainActor private func speakLocally(_ text: String, counted: Bool = false) throws {
-        let language = NLLanguageRecognizer.dominantLanguage(for: text) == .english ? "en-US" : "th-TH"
+        let language = text.unicodeScalars.contains { (0x0E00...0x0E7F).contains($0.value) } ? "th-TH" : "en-US"
         guard let voice = VoiceCatalog.voice(for: language) ?? AVSpeechSynthesisVoice(language: "en-US") else {
             throw VoxError("No text-to-speech voice installed for \(language).")
         }

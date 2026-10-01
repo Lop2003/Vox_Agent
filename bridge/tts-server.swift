@@ -8,13 +8,13 @@
 //   stdout: {"id": 1, "ok": true}   or   {"id": 1, "error": "..."}
 // Prints {"ready": true, "voices": {...}} once it has started.
 import AVFoundation
-import NaturalLanguage
 
 struct Job: Decodable { let id: Int; let text: String; let out: String }
 
-/// Thai unless the text is clearly English; premium > enhanced > compact.
+/// Thai if the text has any Thai letters (a Thai voice also reads English words), else English;
+/// premium > enhanced > compact.
 func voice(for text: String) -> AVSpeechSynthesisVoice? {
-    let language = NLLanguageRecognizer.dominantLanguage(for: text) == .english ? "en-US" : "th-TH"
+    let language = text.unicodeScalars.contains { (0x0E00...0x0E7F).contains($0.value) } ? "th-TH" : "en-US"
     return AVSpeechSynthesisVoice.speechVoices()
         .filter { $0.language == language }
         .max { $0.quality.rawValue < $1.quality.rawValue } ?? AVSpeechSynthesisVoice(language: language)

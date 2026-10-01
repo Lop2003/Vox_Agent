@@ -280,7 +280,7 @@ public final class AppModel {
         phase = .running
         if inCall, let ack = cue(for: .analyzing) { say(ack) } // acknowledge right away, like a person would
 
-        runner.run(text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile,
+        runner.run(text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile, language: localeID,
                    onEvent: { [weak self] event in self?.handle(event, turn: turnID) },
                    onFinish: { [weak self] status, error in self?.finish(turn: turnID, status: status, error: error) })
     }

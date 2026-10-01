@@ -8,12 +8,13 @@
 // bridge: no Bonjour, and exit as soon as the parent closes our stdin (so it never outlives the app).
 //
 // Agents come from --agents, else $VOXCODE_HOME/agents.json (default ~/.voxcode), else Claude Code + Codex.
-// Each agent drives the `claude` or `codex` CLI; Codex can also reach Ollama, OpenRouter and other
-// providers through `-c`/`-m` args. See agents.example.json.
+// "cli": "claude" | "codex" drive those coding-agent CLIs (Codex can also reach OpenRouter etc. via -c/-m args).
+// "cli": "ollama" chats with a local model directly: no file access, but small models answer properly
+// (through Codex they ignore the reply language and invent results). See agents.example.json.
 //
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
-//   app → bridge  {"run":{"id","text","agent","activeFile"?}} | {"cancel":{}} | {"reset":{}}
+//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?}} | {"cancel":{}} | {"reset":{}}
 //                 {"speak":{"id","text"}}
 //   bridge → app  {"hello":{"workspace","agents","speech"}}
 //                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
@@ -26,6 +27,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { Readable } from 'node:stream';
 import tls from 'node:tls';
 import { pathToFileURL } from 'node:url';
 
@@ -67,9 +69,19 @@ export function describeWorkspace(workspace, maxEntries = 50) {
 }
 
 /// Keep in sync with PromptBuilder.swift (used when the Mac app runs agents itself).
-export function buildPrompt({ text, workspace, activeFile, agent, isFollowUp }) {
-  return `# Vox Agent request${isFollowUp ? ' (follow-up in the same conversation)' : ''}
+/// The app sends its speech language: say it outright. "Reply in the user's language" isn't enough when a
+/// Thai request is full of English tech words and the whole prompt is English (local models drift to English).
+export function replyLanguageRule(language) {
+  // Written in Thai too: small local models follow an instruction in the target language far more reliably.
+  if (language?.startsWith('th')) return 'Reply in Thai (ตอบเป็นภาษาไทย). Keep code, commands, file names and technical terms in English.';
+  if (language?.startsWith('en')) return 'Reply in English.';
+  return 'Reply in the language of the user request.';
+}
 
+export function buildPrompt({ text, workspace, activeFile, agent, isFollowUp, language }) {
+  const rule = replyLanguageRule(language);
+  return `# Vox Agent request${isFollowUp ? ' (follow-up in the same conversation)' : ''}
+${language ? rule + '\n' : ''}
 ## User request
 Spoken by the user and converted with speech-to-text, so it may be informal, incomplete, or contain recognition errors:
 > ${text.replaceAll('\n', '\n> ')}
@@ -99,12 +111,30 @@ You are a software engineering agent working in the workspace above. Inspect the
 - Report conclusions only; do not include internal reasoning.
 
 ## Response format
-Reply in the language of the user request. Use exactly these Markdown headings, in English:
+${rule} Use exactly these Markdown headings, in English:
 ${RESPONSE_SECTIONS.map((s) => '## ' + s).join('\n')}
-Keep Summary to 1–3 short sentences because it is read aloud. For a plain question, answer under Summary and write "None" in the other sections.`;
+Keep Summary to 1–3 short sentences because it is read aloud. For a plain question, answer under Summary and write "None" in the other sections.${language ? '\n\n' + rule : ''}`;
 }
 
-// MARK: Agent CLIs (keep in sync with ClaudeCodeAgent.swift / CodexAgent.swift)
+/// System prompt for local chat models: short, and in Thai when the app speaks Thai, which is what makes
+/// small models answer in Thai and admit what they can't see instead of inventing it.
+export function chatSystemPrompt(workspace, language) {
+  const context = describeWorkspace(workspace);
+  if (language?.startsWith('th')) {
+    return `คุณคือ Vox Agent ผู้ช่วยนักพัฒนาซอฟต์แวร์ที่คุยด้วยเสียง ตอบเป็นภาษาไทยเสมอ (คำศัพท์เทคนิค ชื่อไฟล์ และโค้ดใช้ภาษาอังกฤษได้)
+โปรเจกต์ที่ผู้ใช้กำลังทำ: ${path.basename(workspace)}
+${context}
+คุณอ่านไฟล์ แก้ไฟล์ หรือรันคำสั่งไม่ได้ ห้ามแต่งว่าได้ตรวจสอบหรือแก้ไขแล้ว ถ้าคำถามต้องดูโค้ดจริง ให้ตอบเท่าที่รู้ แล้วแนะนำให้สลับไปใช้ Claude Code
+รูปแบบคำตอบ: ขึ้นต้นด้วยหัวข้อ "## Summary" ตามด้วยคำตอบสั้นๆ 1–3 ประโยค (จะถูกอ่านออกเสียง) ถ้ามีรายละเอียดเพิ่มให้ใส่ใต้หัวข้อ "## Result"`;
+  }
+  return `You are Vox Agent, a voice assistant for software developers. ${replyLanguageRule(language)}
+The user's project: ${path.basename(workspace)}
+${context}
+You cannot read files, edit files or run commands. Never claim you checked or changed anything; if the question needs the actual code, answer what you can and suggest switching to Claude Code.
+Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); put any details under "## Result".`;
+}
+
+// MARK: Agent CLIs
 
 const ev = (kind, value) => ({ [kind]: { _0: value } });
 const truncate = (s, max = 120) => {
@@ -196,16 +226,17 @@ export function parseCodex(line) {
 /// Runs one agent at a time in `workspace`, remembering each agent's session for follow-ups.
 export class AgentSession {
   constructor(workspace, agents, emit) {
-    Object.assign(this, { workspace, agents, emit, sessions: new Map(), current: null });
+    Object.assign(this, { workspace, agents, emit, sessions: new Map(), chats: new Map(), current: null });
   }
 
-  run({ id, text, agent: name, activeFile }) {
+  run({ id, text, agent: name, activeFile, language }) {
     if (this.current) return this.emit({ finished: { id, status: 'Failed', error: 'The agent is already running.' } });
     const agent = this.agents.find((a) => a.name === name);
     if (!agent) return this.emit({ finished: { id, status: 'Failed', error: `Unknown agent: ${name}` } });
+    if (agent.cli === 'ollama') return this.chat({ id, text, agent, language });
 
     const sessionID = this.sessions.get(name);
-    const prompt = buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID });
+    const prompt = buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
     const args = agent.cli === 'claude'
       ? claudeArgs(prompt, sessionID, agent.args)
       : codexArgs(prompt, sessionID, agent.args, this.workspace);
@@ -250,11 +281,64 @@ export class AgentSession {
     });
   }
 
+  /// Local model via Ollama's chat API, streaming the answer as it is written. Keeps the chat for follow-ups.
+  chat({ id, text, agent, language }) {
+    const controller = new AbortController();
+    const run = { id };
+    this.current = run;
+    run.finish = (status, error) => {
+      if (this.current !== run) return;
+      this.current = null;
+      clearTimeout(run.timer);
+      if (status !== 'Completed') controller.abort(); // stop generating on cancel/timeout
+      this.emit({ finished: { id, status, ...(error ? { error } : {}) } });
+    };
+    run.timer = setTimeout(() => run.finish('Failed', `Timed out after ${TIMEOUT_MS / 60000} minutes.`), TIMEOUT_MS);
+
+    const history = this.chats.get(agent.name) ?? [{ role: 'system', content: chatSystemPrompt(this.workspace, language) }];
+    const messages = [...history, { role: 'user', content: text }];
+    this.emit({ event: { id, event: ev('status', 'Analyzing') } });
+
+    (async () => {
+      const host = agent.host ?? 'http://localhost:11434';
+      const response = await fetch(`${host}/api/chat`, {
+        method: 'POST',
+        signal: controller.signal,
+        // think: false — qwen3 & co. otherwise spend most of the time on hidden reasoning.
+        body: JSON.stringify({ model: agent.model, messages, stream: true, think: false, ...(agent.options ? { options: agent.options } : {}) }),
+      });
+      if (!response.ok) throw new Error(`Ollama: ${response.status} ${(await response.text()).slice(0, 200)}`);
+      let answer = '';
+      let shown = 0;
+      const body = Readable.fromWeb(response.body);
+      body.on('error', () => {}); // an abort also errors the stream; the loop below reports it
+      for await (const line of readline.createInterface({ input: body })) {
+        if (!line.trim()) continue;
+        const chunk = JSON.parse(line);
+        if (chunk.error) throw new Error(`Ollama: ${chunk.error}`);
+        answer += chunk.message?.content ?? '';
+        // Stream to the app a few times a second rather than per token.
+        if (answer.length - shown > 40 || chunk.done) {
+          shown = answer.length;
+          this.emit({ event: { id, event: ev('message', answer.trim()) } });
+        }
+        if (chunk.done) break;
+      }
+      this.chats.set(agent.name, [...messages, { role: 'assistant', content: answer }]);
+      this.emit({ event: { id, event: ev('completed', answer.trim()) } });
+      run.finish('Completed');
+    })().catch((err) => {
+      if (err.name === 'AbortError') return; // cancelled or timed out: already finished
+      run.finish('Failed', err.cause?.code === 'ECONNREFUSED' ? 'Ollama is not running. Open the Ollama app.' : err.message);
+    });
+  }
+
   cancel() { this.current?.finish('Cancelled'); }
 
   reset() {
     this.cancel();
     this.sessions.clear();
+    this.chats.clear();
   }
 }
 
@@ -318,7 +402,9 @@ function loadAgents(file) {
   if (!file) return DEFAULT_AGENTS;
   const agents = JSON.parse(fs.readFileSync(file, 'utf8'));
   for (const a of agents) {
-    if (!a.name || !['claude', 'codex'].includes(a.cli)) throw new Error(`Bad agent in ${file}: ${JSON.stringify(a)} (needs "name" and "cli": "claude" | "codex")`);
+    if (!a.name || !['claude', 'codex', 'ollama'].includes(a.cli) || (a.cli === 'ollama' && !a.model)) {
+      throw new Error(`Bad agent in ${file}: ${JSON.stringify(a)} (needs "name" and "cli": "claude" | "codex" | "ollama"; ollama also needs "model")`);
+    }
   }
   return agents;
 }
