@@ -6,6 +6,8 @@ struct MobileView: View {
     @State private var model = AppModel()
     @State private var bridge = BridgeClient()
     @State private var showPairing = false
+    @State private var sidebarOpen = false
+    @GestureState private var drag: CGFloat = 0
     @AppStorage("theme") private var theme = Theme.system
     @Environment(\.scenePhase) private var scenePhase
 
@@ -38,14 +40,42 @@ struct MobileView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ConversationView(model: model, emptyHint: bridge.isConnected
-                ? "พิมพ์ แตะไมค์ หรือกด 〰️ เพื่อคุยแบบโทรศัพท์"
-                : "Run the Vox Agent bridge on your computer, then tap the title to pair.")
-                .safeAreaInset(edge: .bottom, spacing: 0) { Composer(model: model) }
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { toolbar }
-                .sheet(isPresented: $showPairing) { PairingView(bridge: bridge) }
+        GeometryReader { geo in
+            let width = min(320, geo.size.width * 0.82)
+            // How far the sidebar is out: 0 closed … width open, following the finger while dragging.
+            let reveal = max(0, min(width, (sidebarOpen ? width : 0) + drag))
+            ZStack(alignment: .leading) {
+                NavigationStack {
+                    ConversationView(model: model, emptyHint: bridge.isConnected
+                        ? "พิมพ์ แตะไมค์ หรือกด 〰️ เพื่อคุยแบบโทรศัพท์"
+                        : "Run the Vox Agent bridge on your computer, then tap the title to pair.")
+                        .safeAreaInset(edge: .bottom, spacing: 0) { Composer(model: model) }
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar { toolbar }
+                        .sheet(isPresented: $showPairing) { PairingView(bridge: bridge) }
+                }
+                .overlay {
+                    // Dim the chat while the sidebar is out; tap to close.
+                    Color.black.opacity(0.3 * reveal / width)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(sidebarOpen)
+                        .onTapGesture { sidebarOpen = false }
+                }
+                .overlay(alignment: .leading) {
+                    // Swipe in from the left edge to open.
+                    Color.clear.frame(width: 20).contentShape(Rectangle())
+                        .gesture(sidebarDrag(width: width))
+                        .allowsHitTesting(!sidebarOpen)
+                }
+                .offset(x: reveal)
+
+                Sidebar(model: model) { sidebarOpen = false }
+                    .frame(width: width)
+                    .offset(x: reveal - width)
+                    .gesture(sidebarDrag(width: width))
+            }
+            .animation(.snappy(duration: 0.3), value: sidebarOpen)
+            .animation(.interactiveSpring, value: drag)
         }
         .fullScreenCover(isPresented: Binding(get: { model.inCall }, set: { if !$0, model.inCall { model.toggleCall() } })) {
             CallView(model: model)
@@ -63,6 +93,16 @@ struct MobileView: View {
         .preferredColorScheme(theme.colorScheme)
     }
 
+    /// Drag to open or close; past half way (or a quick flick) it snaps the rest of the way.
+    private func sidebarDrag(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .updating($drag) { value, state, _ in state = value.translation.width }
+            .onEnded { value in
+                let moved = value.predictedEndTranslation.width
+                sidebarOpen = sidebarOpen ? moved > -width / 2 : moved > width / 2
+            }
+    }
+
     private func reconnect() {
         guard let code = PairingStore.code else { return }
         switch bridge.state {
@@ -76,9 +116,8 @@ struct MobileView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button(action: model.newConversation) { Image(systemName: "square.and.pencil") }
-                .accessibilityLabel("New conversation")
-                .disabled(model.turns.isEmpty)
+            Button { sidebarOpen = true } label: { Image(systemName: "line.3.horizontal") }
+                .accessibilityLabel("Chats")
         }
         ToolbarItem(placement: .principal) {
             // The title is the agent picker (like a chat app's model switcher); the line below is the connection.
@@ -405,6 +444,89 @@ struct Orb: View {
                 .padding(28)
         }
         .animation(.easeInOut, value: listening)
+    }
+}
+
+// MARK: - Sidebar
+
+/// Slide-out sidebar: start a new conversation or reopen a saved one. Swipe a chat left to delete it.
+struct Sidebar: View {
+    let model: AppModel
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                LogoMark(size: 30)
+                Text("Vox Agent").font(.title3.bold())
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 16)
+
+            Button {
+                model.newConversation()
+                close()
+            } label: {
+                Label("New conversation", systemImage: "square.and.pencil")
+                    .font(.body.weight(.medium))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+
+            Text("Recent")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 22)
+                .padding(.bottom, 4)
+
+            if model.conversations.isEmpty {
+                Text("Your chats will appear here.")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                Spacer()
+            } else {
+                List {
+                    ForEach(model.conversations) { conversation in
+                        Button {
+                            model.open(conversation)
+                            close()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(conversation.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                                Text(conversation.updatedAt.formatted(.relative(presentation: .named)))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(conversation.id == model.conversationID ? Color(.tertiarySystemFill) : .clear)
+                                .padding(.horizontal, 8)
+                        )
+                        .listRowSeparator(.hidden)
+                        .swipeActions {
+                            Button("Delete", systemImage: "trash", role: .destructive) { model.delete(conversation) }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(.secondarySystemBackground).ignoresSafeArea())
     }
 }
 

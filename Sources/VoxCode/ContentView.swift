@@ -90,6 +90,17 @@ struct ContentView: View {
             .disabled(model.phase == .running)
         }
         ToolbarItem(placement: .primaryAction) {
+            Menu {
+                if model.conversations.isEmpty { Text("No saved chats") }
+                ForEach(model.conversations.prefix(30)) { conversation in
+                    Button(conversation.title) { model.open(conversation) }
+                }
+            } label: {
+                Label("History", systemImage: "clock.arrow.circlepath")
+            }
+            .help("Saved chats")
+        }
+        ToolbarItem(placement: .primaryAction) {
             Button(action: model.newConversation) { Label("New Conversation", systemImage: "square.and.pencil") }
                 .help("Start a new conversation")
         }

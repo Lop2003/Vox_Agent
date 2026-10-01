@@ -2,8 +2,8 @@ import Foundation
 import Observation
 import VoxCodeCore
 
-public struct Turn: Identifiable {
-    public let id = UUID()
+public struct Turn: Identifiable, Codable, Equatable {
+    public var id = UUID()
     public let user: String
     public let agent: String
     public var response = ""
@@ -13,7 +13,7 @@ public struct Turn: Identifiable {
 }
 
 /// Application state and the voice → agent → speech loop, shared by the Mac and iPhone apps.
-/// Where the agent actually runs is up to `runner`: this Mac (`AgentSession`) or the bridge (`BridgeClient`).
+/// Where the agent actually runs is up to `runner` (the bridge, via `BridgeClient`). Chats are saved to `store`.
 @MainActor @Observable
 public final class AppModel {
     public enum Phase: Equatable { case idle, listening, transcribing, running }
@@ -77,7 +77,14 @@ public final class AppModel {
     /// Latest agent sentence in call mode, spoken once the agent moves on to its next step.
     private var narration: String?
 
-    public init() {
+    /// Saved chats, newest first (includes the current one once it has a turn).
+    public private(set) var conversations: [Conversation]
+    public private(set) var conversationID = UUID()
+    private let store: ChatStore
+
+    public init(store: ChatStore = .standard) {
+        self.store = store
+        conversations = store.load()
         tts.onFinish = { [weak self] in self?.speechFinished() }
     }
 
@@ -268,6 +275,7 @@ public final class AppModel {
         let kind = agent
         turns.append(Turn(user: text, agent: kind))
         let turnID = turns[turns.count - 1].id
+        persist()
         transcript = ""
         phase = .running
         if inCall, let ack = cue(for: .analyzing) { say(ack) } // acknowledge right away, like a person would
@@ -301,6 +309,7 @@ public final class AppModel {
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
         turns[i].status = status
         turns[i].error = error
+        persist()
         guard turns[i].id == turns.last?.id, phase == .running else { return }
         phase = .idle
         narration = nil // the last message is the answer itself
@@ -339,7 +348,33 @@ public final class AppModel {
         cancel()
         runner?.reset()
         turns = []
+        conversationID = UUID()
         errorMessage = nil
+    }
+
+    // MARK: History
+
+    /// Shows a saved chat. The agent starts fresh: it doesn't remember that chat's context.
+    public func open(_ conversation: Conversation) {
+        guard conversation.id != conversationID else { return }
+        cancel()
+        runner?.reset()
+        turns = conversation.turns
+        conversationID = conversation.id
+        errorMessage = nil
+    }
+
+    public func delete(_ conversation: Conversation) {
+        conversations.removeAll { $0.id == conversation.id }
+        store.save(conversations)
+        if conversation.id == conversationID { newConversation() }
+    }
+
+    private func persist() {
+        guard !turns.isEmpty else { return }
+        conversations.removeAll { $0.id == conversationID }
+        conversations.insert(Conversation(id: conversationID, turns: turns, updatedAt: Date()), at: 0)
+        store.save(conversations)
     }
 
     // MARK: Speech output
