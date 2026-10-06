@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildPrompt, replyLanguageRule, codexArgs, describeWorkspace, generalPrompt, loadAgents, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS, workspacesFor } from './voxcode-bridge.mjs';
+import { buildPrompt, replyLanguageRule, claudeArgs, codexArgs, sanitizeOptions, describeWorkspace, generalPrompt, loadAgents, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS, workspacesFor } from './voxcode-bridge.mjs';
 
 test('claude stream-json parsing', () => {
   assert.deepEqual(parseClaude('{"type":"system","subtype":"init","session_id":"s1"}'), [{ session: { _0: 's1' } }]);
@@ -163,4 +163,18 @@ test('cancelling an ollama chat stops it cleanly', async () => {
     server.close();
     fs.rmSync(dir, { recursive: true });
   }
+});
+
+test('permission modes and effort become CLI flags (and nothing else does)', () => {
+  const has = (args, ...seq) => args.join(' ').includes(seq.join(' '));
+  assert.ok(has(claudeArgs('p', null, [], { mode: 'manual' }), '--permission-mode', 'acceptEdits'));
+  assert.ok(has(claudeArgs('p', null, [], {}), '--permission-mode', 'auto'));
+  const full = claudeArgs('p', null, [], { mode: 'full', effort: 'max' });
+  assert.ok(full.includes('--dangerously-skip-permissions') && !full.includes('--permission-mode'));
+  assert.ok(has(full, '--effort', 'max'));
+  assert.ok(has(codexArgs('p', null, [], '/w', { mode: 'full' }), '-s', 'danger-full-access'));
+  assert.ok(has(codexArgs('p', 't1', [], '/w', { mode: 'full', effort: 'max' }), '-c', 'sandbox_mode="danger-full-access"', '-c', 'model_reasoning_effort="xhigh"'));
+  assert.ok(has(codexArgs('p', null, ['-c', 'model_reasoning_effort="none"'], '/w', { effort: 'high' }),
+    '-c', 'model_reasoning_effort="high"', '-c', 'model_reasoning_effort="none"')); // agent's own setting comes last and wins
+  assert.deepEqual(sanitizeOptions({ mode: 'root; rm -rf /', effort: '"; echo' }), { mode: 'auto', effort: undefined });
 });

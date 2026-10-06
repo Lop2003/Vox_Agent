@@ -40,8 +40,8 @@ import Testing
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     func json(_ value: some Encodable) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
 
-    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH"))
-        == #"{"run":{"agent":"Codex","id":"00000000-0000-0000-0000-000000000001","language":"th-TH","text":"hi"}}"#)
+    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH", mode: "full", effort: "high"))
+        == #"{"run":{"agent":"Codex","effort":"high","id":"00000000-0000-0000-0000-000000000001","language":"th-TH","mode":"full","text":"hi"}}"#)
     #expect(try json(ClientMessage.cancel) == #"{"cancel":{}}"#)
 
     let decode = { (s: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(s.utf8)) }
@@ -136,7 +136,7 @@ func bridgePairingRunAndCancel() async throws {
 
     var events: [AgentEvent] = []
     var result: (AgentStatus, String?)?
-    client.run("ping", agent: "Fast", activeFile: nil, language: nil, onEvent: { events.append($0) }, onFinish: { result = ($0, $1) })
+    client.run(AgentRequest(text: "ping", agent: "Fast"), onEvent: { events.append($0) }, onFinish: { result = ($0, $1) })
     await waitFor { result != nil }
     #expect(result?.0 == .completed)
     #expect(events.contains(.message("ดูโค้ดก่อน")))
@@ -145,7 +145,7 @@ func bridgePairingRunAndCancel() async throws {
 
     // Cancelling finishes locally at once; the bridge's late reply is dropped by request id.
     var finished: [AgentStatus] = []
-    client.run("wait", agent: "Slow", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { status, _ in finished.append(status) })
+    client.run(AgentRequest(text: "wait", agent: "Slow"), onEvent: { _ in }, onFinish: { status, _ in finished.append(status) })
     try await Task.sleep(for: .milliseconds(300))
     client.cancel()
     try await Task.sleep(for: .milliseconds(300))
@@ -153,13 +153,13 @@ func bridgePairingRunAndCancel() async throws {
 
     // The bridge is free again after the cancel.
     result = nil
-    client.run("again", agent: "Fast", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { result = ($0, $1) })
+    client.run(AgentRequest(text: "again", agent: "Fast"), onEvent: { _ in }, onFinish: { result = ($0, $1) })
     await waitFor { result != nil }
     #expect(result?.0 == .completed)
 
     // Unknown agents fail cleanly.
     result = nil
-    client.run("x", agent: "Nope", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { result = ($0, $1) })
+    client.run(AgentRequest(text: "x", agent: "Nope"), onEvent: { _ in }, onFinish: { result = ($0, $1) })
     await waitFor { result != nil }
     #expect(result?.0 == .failed)
     client.disconnect()
@@ -180,7 +180,7 @@ func clientReconnectsWhenBridgeRestarts() async throws {
 
     // A run in flight when the bridge dies fails instead of hanging forever.
     var result: AgentStatus?
-    client.run("x", agent: "Slow", activeFile: nil, language: nil, onEvent: { _ in }, onFinish: { status, _ in result = status })
+    client.run(AgentRequest(text: "x", agent: "Slow"), onEvent: { _ in }, onFinish: { status, _ in result = status })
     try await Task.sleep(for: .milliseconds(200))
     bridge.stop()
     await waitFor { if case .waiting = client.state { true } else { false } }
@@ -200,8 +200,12 @@ func clientReconnectsWhenBridgeRestarts() async throws {
 func localBridgeExitsWithItsOwner() async throws {
     let box = try Sandbox()
     let bridge = try box.bridge()
-    try await Task.sleep(for: .milliseconds(800))
-    let pid = try #require(bridgePID(port: bridge.port))
+    var found: pid_t?
+    for _ in 0..<50 where found == nil { // wait for it to bind (slower when the machine is busy)
+        found = bridgePID(port: bridge.port)
+        if found == nil { try await Task.sleep(for: .milliseconds(100)) }
+    }
+    let pid = try #require(found)
     bridge.stop()
     try await Task.sleep(for: .milliseconds(800))
     #expect(kill(pid, 0) != 0, "bridge process \(pid) still running")
@@ -249,7 +253,7 @@ func bridgeRealAgent() async throws {
 
     var messages: [String] = []
     var result: AgentStatus?
-    client.run("Reply with exactly: pong", agent: agent, activeFile: nil, language: nil,
+    client.run(AgentRequest(text: "Reply with exactly: pong", agent: agent),
                onEvent: { if case .message(let t) = $0 { messages.append(t) } },
                onFinish: { status, _ in result = status })
     for _ in 0..<1200 where result == nil { try await Task.sleep(for: .milliseconds(100)) }
@@ -269,4 +273,27 @@ func fallsBackToTheSavedAddress() async throws {
     await waitFor(seconds: 10) { client.isConnected }
     #expect(client.state == .connected(workspace: "ws"))
     client.disconnect()
+}
+
+@Test func pairingLinkRoundTrip() throws {
+    let link = PairingLink(code: "ABCD-EFGH-JK23", host: "100.101.102.103")
+    #expect(link.url.absoluteString == "voxagent://pair?code=ABCD-EFGH-JK23&host=100.101.102.103")
+    #expect(PairingLink(url: link.url) == link)
+    #expect(PairingLink(url: URL(string: "voxagent://pair?code=ABCD-EFGH-JK23&port=50000")!)?.port == 50000)
+    #expect(PairingLink(url: URL(string: "voxagent://pair?code=SHORT")!) == nil)       // not a real code
+    #expect(PairingLink(url: URL(string: "https://pair?code=ABCD-EFGH-JK23")!) == nil)  // wrong scheme
+}
+
+@Test func preferredHostPicksTailscaleFirst() {
+    #expect(PairingLink.preferredHost(from: ["192.168.1.20", "100.88.1.2"]) == "100.88.1.2")
+    #expect(PairingLink.preferredHost(from: ["192.168.1.20", "100.200.1.2"]) == "192.168.1.20") // 100.200 isn't Tailscale's range
+    #expect(PairingLink.preferredHost(from: []) == nil)
+}
+
+@Test func servicePlistIsValidAndEscaped() throws {
+    let xml = BridgeService.plist(node: "/n/node", script: "/a & b/bridge.mjs", workspace: "/w/<proj>", path: "/usr/bin", log: "/l.log")
+    let plist = try #require(try PropertyListSerialization.propertyList(from: Data(xml.utf8), format: nil) as? [String: Any])
+    #expect(plist["ProgramArguments"] as? [String] == ["/usr/bin/caffeinate", "-i", "/n/node", "/a & b/bridge.mjs", "--workspace", "/w/<proj>"])
+    #expect(plist["WorkingDirectory"] as? String == "/w/<proj>")
+    #expect(plist["KeepAlive"] as? Bool == true)
 }

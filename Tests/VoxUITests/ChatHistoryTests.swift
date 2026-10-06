@@ -9,9 +9,10 @@ private final class FakeRunner: AgentRunner {
     var agents = ["Fake"]
     lazy var workspaces = [AgentWorkspace(id: AgentWorkspace.code, name: "Workspace", agents: agents)]
     var resets = 0
-    func run(_ text: String, agent: String, activeFile: String?, language: String?,
+    func run(_ request: AgentRequest,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
              onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
+        let text = request.text
         onEvent(.message("## Summary\nanswer to \(text)"))
         onFinish(.completed, nil)
     }
@@ -114,9 +115,10 @@ private final class StreamingRunner: AgentRunner {
     var agents = ["Local"]
     let pieces: [String]
     init(_ pieces: [String]) { self.pieces = pieces }
-    func run(_ text: String, agent: String, activeFile: String?, language: String?,
+    func run(_ request: AgentRequest,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
              onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
+        let text = request.text
         var answer = ""
         for piece in pieces {
             answer += piece
@@ -171,12 +173,13 @@ struct MuteTests {
 
 /// Counts how many requests actually reached the agent.
 @MainActor
-private final class CountingRunner: AgentRunner {
+final class CountingRunner: AgentRunner {
     var agents = ["Claude Code"]
     var runs: [String] = []
-    func run(_ text: String, agent: String, activeFile: String?, language: String?,
+    func run(_ request: AgentRequest,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
              onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
+        let text = request.text
         runs.append(text)
         onFinish(.completed, nil)
     }
@@ -189,7 +192,7 @@ struct ConfirmChangesTests {
     private func model() -> (AppModel, CountingRunner) {
         let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
         model.tts.volume = 0
-        model.confirmChanges = true
+        model.permissionMode = .auto
         let runner = CountingRunner()
         model.runner = runner
         return (model, runner)
@@ -231,5 +234,23 @@ struct ConfirmChangesTests {
         model.transcript = "โปรเจกต์นี้ทำอะไรได้บ้าง"
         model.send(spoken: true)             // spoken but read-only
         #expect(runner.runs == ["แก้ไฟล์ README", "โปรเจกต์นี้ทำอะไรได้บ้าง"])
+    }
+}
+
+@MainActor
+struct ConfirmWhileListeningTests {
+    /// In a call the app asks "ใช่ไหม" and listens; tapping Run must still send (it used to do nothing).
+    @Test func tappingRunWhileListeningSends() {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.tts.volume = 0
+        model.permissionMode = .auto
+        let runner = CountingRunner()
+        model.runner = runner
+        model.transcript = "สร้างไฟล์ README"
+        model.send(spoken: true)
+        model.phase = .listening // the mic opened for the spoken answer
+        model.transcript = "อ"   // a partial word already heard
+        model.confirmPending()
+        #expect(runner.runs == ["สร้างไฟล์ README"])
     }
 }

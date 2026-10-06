@@ -193,6 +193,36 @@ public struct CallWaveform: View {
     }
 }
 
+public extension PermissionMode {
+    var title: String {
+        switch self {
+        case .manual: "Manual"
+        case .auto: "Auto"
+        case .full: "Full access"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .manual: "Ask before every change; no shell commands"
+        case .auto: "Ask before spoken changes"
+        case .full: "Never ask; agent can run anything"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .manual: "hand.raised"
+        case .auto: "checkmark.shield"
+        case .full: "exclamationmark.triangle"
+        }
+    }
+}
+
+public extension Effort {
+    var title: String { self == .standard ? "Default" : rawValue.capitalized }
+}
+
 public struct MicButton: View {
     let phase: AppModel.Phase
     let size: CGFloat

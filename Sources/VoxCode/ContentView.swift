@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var workspace = WorkspaceManager.load()
     @State private var bridge = BridgeClient()
     @State private var localBridge: LocalBridge?
+    @State private var showPairPhone = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +25,7 @@ struct ContentView: View {
         .frame(minWidth: 680, minHeight: 600)
         .toolbar { toolbar }
         .navigationTitle("Vox Agent")
+        .sheet(isPresented: $showPairPhone) { PairPhoneView() }
         .onAppear {
             model.runnerMissingMessage = "Choose a workspace folder first."
             if let workspace { startBridge(in: workspace) }
@@ -99,6 +101,10 @@ struct ContentView: View {
             }
             .fixedSize()
             .disabled(model.phase == .running)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showPairPhone = true } label: { Label("Pair iPhone", systemImage: "iphone") }
+                .help("Run the bridge for your iPhone and show its pairing QR code")
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
@@ -182,7 +188,15 @@ struct ContentView: View {
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Speak responses", isOn: $model.autoSpeak)
                 Toggle("Interrupt by voice", isOn: $model.bargeInEnabled)
-                Toggle("Confirm before changes", isOn: $model.confirmChanges)
+                Picker("Permissions", selection: $model.permissionMode) {
+                    ForEach(PermissionMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .fixedSize()
+                .help(model.permissionMode.detail)
+                Picker("Effort", selection: $model.effort) {
+                    ForEach(Effort.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .fixedSize()
                 Spacer()
                 TextField("Active file (optional)", text: $model.activeFile)
                     .textFieldStyle(.roundedBorder)

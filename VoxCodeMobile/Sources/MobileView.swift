@@ -82,6 +82,14 @@ struct MobileView: View {
             reconnect()
             if PairingStore.code == nil { showPairing = true }
         }
+        // The Mac app's pairing QR code (voxagent://pair?…), scanned with the Camera, lands here.
+        .onOpenURL { url in
+            guard let link = PairingLink(url: url) else { return }
+            PairingStore.code = link.code
+            PairingStore.host = link.host ?? ""
+            showPairing = false
+            bridge.connect(pairingCode: link.code, host: link.host, port: link.port, preferLocalNetwork: true)
+        }
         // iOS drops sockets in the background; reconnect when the app comes back.
         .onChange(of: scenePhase) { if scenePhase == .active { reconnect() } }
         // Keep the screen on during a call, like the Phone app.
@@ -138,6 +146,9 @@ struct MobileView: View {
                     HStack(spacing: 4) {
                         Circle().fill(connectionColor).frame(width: 6, height: 6)
                         Text(connectionText).lineLimit(1).truncationMode(.middle)
+                        if model.permissionMode == .full {
+                            Text("· Full access").foregroundStyle(Color.orange) // always visible while it's on
+                        }
                     }
                     .font(.caption2)
                     .foregroundStyle(Color.secondary)
@@ -169,7 +180,20 @@ struct MobileView: View {
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Read answers aloud", isOn: $model.autoSpeak)
                 Toggle("Interrupt by voice (calls)", isOn: $model.bargeInEnabled)
-                Toggle("Confirm before changes", isOn: $model.confirmChanges)
+                Picker(selection: $model.permissionMode) {
+                    ForEach(PermissionMode.allCases, id: \.self) { mode in
+                        Button {} label: { Label(mode.title, systemImage: mode.icon); Text(mode.detail) }.tag(mode)
+                    }
+                } label: {
+                    Label("Permissions: \(model.permissionMode.title)", systemImage: model.permissionMode.icon)
+                }
+                .pickerStyle(.menu)
+                Picker(selection: $model.effort) {
+                    ForEach(Effort.allCases, id: \.self) { Text($0.title).tag($0) }
+                } label: {
+                    Label("Effort: \(model.effort.title)", systemImage: "gauge.with.dots.needle.50percent")
+                }
+                .pickerStyle(.menu)
                 Divider()
                 Button("Pair…", systemImage: "link") { showPairing = true }
             } label: {
@@ -608,7 +632,7 @@ struct PairingView: View {
                 } header: {
                     Text("Pairing code")
                 } footer: {
-                    Text("On your Mac run `voxcode-bridge --workspace <project>` and enter the code it prints. Your iPhone and Mac must be on the same network.")
+                    Text("Easiest: in the Vox Agent Mac app choose Pair iPhone, then scan its QR code with the iPhone Camera. Or type the code the bridge shows.")
                 }
                 Section {
                     TextField("Found automatically", text: $host)

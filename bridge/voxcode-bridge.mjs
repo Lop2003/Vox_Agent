@@ -17,7 +17,8 @@
 //
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
-//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?}} | {"cancel":{}} | {"reset":{}}
+//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?,"mode"?,"effort"?}} | {"cancel":{}} | {"reset":{}}
+//                 mode: "manual" | "auto" | "full" (permissions); effort: "low" | "medium" | "high" | "max"
 //                 {"speak":{"id","text"}}
 //   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}]}}
 //                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
@@ -172,9 +173,21 @@ function statusForCommand(command) {
   return checks.some((k) => c.includes(k)) ? 'Testing' : 'Analyzing';
 }
 
-export function claudeArgs(prompt, sessionID, extra = []) {
-  return ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto',
-    ...(sessionID ? ['--resume', sessionID] : []), ...extra];
+// Only these values ever reach a command line.
+const MODES = ['manual', 'auto', 'full'];
+const EFFORTS = ['low', 'medium', 'high', 'max'];
+export const sanitizeOptions = ({ mode, effort } = {}) => ({
+  mode: MODES.includes(mode) ? mode : 'auto',
+  effort: EFFORTS.includes(effort) ? effort : undefined,
+});
+
+/// manual: edits allowed, shell commands need approval (none headless) · auto: Claude's safety classifier · full: no checks.
+export function claudeArgs(prompt, sessionID, extra = [], options = {}) {
+  const { mode, effort } = sanitizeOptions(options);
+  const permissions = mode === 'full' ? ['--dangerously-skip-permissions']
+    : ['--permission-mode', mode === 'manual' ? 'acceptEdits' : 'auto'];
+  return ['-p', prompt, '--output-format', 'stream-json', '--verbose', ...permissions,
+    ...(effort ? ['--effort', effort] : []), ...(sessionID ? ['--resume', sessionID] : []), ...extra];
 }
 
 export function parseClaude(line) {
@@ -213,10 +226,14 @@ export function parseClaude(line) {
 }
 
 /// `exec resume` has no -s/-C flags, so extra args must be `-c`/`-m` style to work on follow-ups too.
-export function codexArgs(prompt, sessionID, extra = [], workspace) {
+/// The agent's own args come last so an agent can pin its reasoning (e.g. "none" for a small local model).
+export function codexArgs(prompt, sessionID, extra = [], workspace, options = {}) {
+  const { mode, effort } = sanitizeOptions(options);
+  const sandbox = mode === 'full' ? 'danger-full-access' : 'workspace-write';
+  const reasoning = effort ? ['-c', `model_reasoning_effort="${effort === 'max' ? 'xhigh' : effort}"`] : [];
   return sessionID
-    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"', ...extra, sessionID, prompt]
-    : ['exec', '--json', '--skip-git-repo-check', '-s', 'workspace-write', ...extra, '-C', workspace, prompt];
+    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`, ...reasoning, ...extra, sessionID, prompt]
+    : ['exec', '--json', '--skip-git-repo-check', '-s', sandbox, ...reasoning, ...extra, '-C', workspace, prompt];
 }
 
 export function parseCodex(line) {
@@ -254,7 +271,7 @@ export class AgentSession {
     Object.assign(this, { workspace, agents, emit, generalDir, sessions: new Map(), chats: new Map(), current: null });
   }
 
-  run({ id, text, agent: name, activeFile, language }) {
+  run({ id, text, agent: name, activeFile, language, mode, effort }) {
     if (this.current) return this.emit({ finished: { id, status: 'Failed', error: 'The agent is already running.' } });
     const agent = this.agents.find((a) => a.name === name);
     if (!agent) return this.emit({ finished: { id, status: 'Failed', error: `Unknown agent: ${name}` } });
@@ -267,9 +284,11 @@ export class AgentSession {
     const prompt = general
       ? `${generalPrompt(language)}\n\nThe user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}`
       : buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
+    // General-workspace agents keep their web-only tools whatever the mode.
+    const options = general ? { mode: 'auto', effort } : { mode, effort };
     const args = agent.cli === 'claude'
-      ? claudeArgs(prompt, sessionID, [...(general ? GENERAL_CLAUDE_ARGS : []), ...(agent.args ?? [])])
-      : codexArgs(prompt, sessionID, agent.args, cwd);
+      ? claudeArgs(prompt, sessionID, [...(general ? GENERAL_CLAUDE_ARGS : []), ...(agent.args ?? [])], options)
+      : codexArgs(prompt, sessionID, agent.args, cwd, options);
     const parse = agent.cli === 'claude' ? parseClaude : parseCodex;
     const command = agent.command ?? agent.cli;
 
@@ -512,7 +531,11 @@ function main() {
     readline.createInterface({ input: socket }).on('line', (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }
-      if (message.run) { log(`▶︎ ${message.run.agent}: ${message.run.text}`); session.run(message.run); }
+      if (message.run) {
+        const { mode, effort } = sanitizeOptions(message.run);
+        log(`▶︎ ${message.run.agent} [${mode}${effort ? ', ' + effort : ''}]: ${message.run.text}`);
+        session.run(message.run);
+      }
       else if (message.cancel) session.cancel();
       else if (message.reset) session.reset();
       else if (message.speak) {

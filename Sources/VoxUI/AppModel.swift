@@ -116,9 +116,14 @@ public final class AppModel {
     public private(set) var inputLevel: Double = 0
     /// Muted in a call: the mic stays off (no listening, no interrupting) until unmuted; the call goes on.
     public private(set) var micMuted = false
-    /// Ask before running spoken requests that look like they change files (project workspace only).
-    public var confirmChanges = UserDefaults.standard.object(forKey: "confirmChanges") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(confirmChanges, forKey: "confirmChanges") }
+    /// Manual: confirm every request that would change files. Auto: confirm spoken ones. Full: never (and the
+    /// agent runs without its sandbox). Confirmation applies to the project workspace only.
+    public var permissionMode = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "permissionMode") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(permissionMode.rawValue, forKey: "permissionMode") }
+    }
+    /// How hard the model thinks; `.standard` keeps each CLI's own default.
+    public var effort = Effort(rawValue: UserDefaults.standard.string(forKey: "effort") ?? "") ?? .standard {
+        didSet { UserDefaults.standard.set(effort.rawValue, forKey: "effort") }
     }
     /// A spoken request waiting for the user's go-ahead (see `confirmPending()` / `cancelPending()`).
     public private(set) var pendingRequest: String?
@@ -172,8 +177,20 @@ public final class AppModel {
     public func confirmPending() {
         guard let request = pendingRequest else { return }
         pendingRequest = nil
+        // In a call the mic is usually open for the spoken answer: stop listening (dropping any partial words)
+        // so the request can go; send() only runs when idle.
+        stopListeningWithoutSending()
         transcript = request
-        send(spoken: false)
+        send(spoken: false, confirmed: true)
+    }
+
+    private func stopListeningWithoutSending() {
+        silenceTask?.cancel()
+        if micOpen {
+            closeMic()
+            stt.cancel()
+        }
+        if phase == .listening || phase == .transcribing { phase = .idle }
     }
 
     /// Drops the request that was waiting for confirmation.
@@ -483,7 +500,7 @@ public final class AppModel {
 
     /// `spoken`: sent automatically after speech-to-text, so it may be misheard and gets confirmed if it would
     /// change files. A pending confirmation is answered by this text instead ("ใช่" / "ไม่" / a new request).
-    func send(spoken: Bool) {
+    func send(spoken: Bool, confirmed: Bool = false) {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard phase == .idle else { return }
         guard !text.isEmpty else { errorMessage = "Nothing to send: the transcription is empty."; return }
@@ -496,7 +513,8 @@ public final class AppModel {
             case .other: pendingRequest = nil // a different request replaces it (and may be confirmed in turn)
             }
         }
-        if spoken, confirmChanges, !inGeneralWorkspace, ChangeIntent.mayChangeFiles(text) {
+        let needsConfirmation = permissionMode == .manual || (permissionMode == .auto && spoken)
+        if !confirmed, needsConfirmation, !inGeneralWorkspace, ChangeIntent.mayChangeFiles(text) {
             pendingRequest = text
             transcript = ""
             if inCall { say(localeID.hasPrefix("th") ? "จะให้ \(agent) ทำตามนี้ใช่ไหม" : "Should \(agent) go ahead with that?") }
@@ -515,7 +533,9 @@ public final class AppModel {
         phase = .running
         if inCall, let ack = cue(for: .analyzing) { say(ack) } // acknowledge right away, like a person would
 
-        runner.run(text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile, language: localeID,
+        let request = AgentRequest(text: text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile,
+                                   language: localeID, mode: permissionMode, effort: effort)
+        runner.run(request,
                    onEvent: { [weak self] event in self?.handle(event, turn: turnID) },
                    onFinish: { [weak self] status, error in self?.finish(turn: turnID, status: status, error: error) })
     }
