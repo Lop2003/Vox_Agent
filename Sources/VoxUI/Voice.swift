@@ -10,7 +10,8 @@ struct VoxError: LocalizedError {
 /// Owns the microphone: permissions and AVAudioEngine capture.
 final class VoiceInputManager {
     private let engine = AVAudioEngine()
-    var echoCancellation = false
+    /// Apple's voice processing: echo cancellation, noise suppression and automatic gain.
+    var voiceProcessing = false
 
     static func requestPermissions() async throws {
         let micGranted: Bool
@@ -36,10 +37,11 @@ final class VoiceInputManager {
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         #endif
         let input = engine.inputNode
-        // Echo cancellation lets the mic stay open while the answer plays (to hear "หยุด") without hearing
-        // the app's own voice. Must be set before reading the format: it changes the input format.
-        if input.isVoiceProcessingEnabled != echoCancellation { try? input.setVoiceProcessingEnabled(echoCancellation) }
-        if echoCancellation {
+        // Voice processing suppresses background noise and cancels echo, so the mic can stay open while the
+        // answer plays (to hear "หยุด") without hearing the app's own voice. Must be set before reading the
+        // format: it changes the input format.
+        if input.isVoiceProcessingEnabled != voiceProcessing { try? input.setVoiceProcessingEnabled(voiceProcessing) }
+        if voiceProcessing {
             // By default voice processing ducks all other audio, which would make our own TTS nearly silent.
             input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
         }
@@ -78,7 +80,14 @@ public final class SpeechToTextService {
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
         // Help mixed Thai/English developer speech.
-        request.contextualStrings = ["Claude Code", "Codex", "login", "rate limit", "API", "test", "build", "bug", "refactor", "commit", "endpoint", "database"]
+        request.contextualStrings = [
+            "Claude Code", "Codex", "Vox Agent",
+            // English dev words said inside Thai sentences, which the recognizer otherwise turns into Thai look-alikes
+            // (e.g. "markdown" → "มาร์คดาว").
+            "markdown", "Markdown", "README", "ไฟล์", "สร้างไฟล์", "โฟลเดอร์", "JSON", "API", "endpoint", "login",
+            "rate limit", "test", "build", "deploy", "bug", "fix", "refactor", "commit", "branch", "pull request",
+            "merge", "database", "function", "component", "TypeScript", "JavaScript", "Swift", "Python", "Docker",
+        ]
         self.request = request
         task = recognizer.recognitionTask(with: request) { result, error in
             if let result {

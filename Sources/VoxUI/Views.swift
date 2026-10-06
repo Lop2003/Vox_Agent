@@ -44,12 +44,19 @@ public struct ConversationView: View {
         withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
-    private static let examples: [(icon: String, text: String)] = [
+    private static let codeExamples: [(icon: String, text: String)] = [
         ("text.magnifyingglass", "โปรเจกต์นี้ทำอะไรได้บ้าง"),
         ("ladybug", "ช่วยหาจุดที่อาจมีปัญหา"),
         ("checkmark.circle", "เช็คว่ายังทำงานปกติไหม"),
         ("clock.arrow.circlepath", "สรุปสิ่งที่เปลี่ยนล่าสุด"),
     ]
+    private static let generalExamples: [(icon: String, text: String)] = [
+        ("map", "ช่วยวางแผนเที่ยวเชียงใหม่ 3 วัน"),
+        ("lightbulb", "อธิบายเรื่อง AI ให้เข้าใจง่ายๆ"),
+        ("envelope", "ช่วยร่างอีเมลขอลางาน"),
+        ("fork.knife", "เย็นนี้กินอะไรดี"),
+    ]
+    private var examples: [(icon: String, text: String)] { model.inGeneralWorkspace ? Self.generalExamples : Self.codeExamples }
 
     /// Greeting centred in the free space; suggestions sit just above the composer, within thumb reach.
     private var emptyState: some View {
@@ -68,7 +75,7 @@ public struct ConversationView: View {
             Spacer(minLength: 24)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    ForEach(Self.examples, id: \.text) { example in
+                    ForEach(examples, id: \.text) { example in
                         Button { model.transcript = example.text } label: {
                             VStack(alignment: .leading, spacing: 8) {
                                 Image(systemName: example.icon).font(.body).foregroundStyle(.tint)
@@ -120,6 +127,69 @@ public struct LogoMark: View {
         #else
         return UIImage(contentsOfFile: url.path).map { Image(uiImage: $0) } ?? Image(systemName: "waveform")
         #endif
+    }
+}
+
+/// Animated bars for the call bar: follow the mic while listening, a lively synthetic wave while the app speaks,
+/// a slow ripple while the agent works.
+public struct CallWaveform: View {
+    public enum Mood: Equatable { case idle, listening, working, speaking }
+
+    let mood: Mood
+    let level: Double
+
+    public init(mood: Mood, level: Double) {
+        self.mood = mood
+        self.level = level
+    }
+
+    private var amplitude: Double {
+        switch mood {
+        case .listening: 0.12 + level * 0.88
+        case .speaking: 0.65
+        case .working: 0.2
+        case .idle: 0.08
+        }
+    }
+
+    private var speed: Double {
+        switch mood {
+        case .listening: 7
+        case .speaking: 8
+        case .working: 2.5
+        case .idle: 1.5
+        }
+    }
+
+    private var colors: [Color] {
+        switch mood {
+        case .listening: [.accentColor, .cyan]
+        case .speaking: [.purple, .pink]
+        case .working, .idle: [.secondary, .secondary.opacity(0.6)]
+        }
+    }
+
+    public var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            Canvas { context, size in
+                let bars = 36
+                let gap: CGFloat = 3
+                let width = (size.width - gap * CGFloat(bars - 1)) / CGFloat(bars)
+                let shading = GraphicsContext.Shading.linearGradient(
+                    Gradient(colors: colors), startPoint: .zero, endPoint: CGPoint(x: size.width, y: 0))
+                for i in 0..<bars {
+                    let position = Double(i) / Double(bars - 1)
+                    let envelope = sin(position * .pi) // taller in the middle, like a voice
+                    let wave = (sin(t * speed + Double(i) * 0.55) + sin(t * speed * 1.7 + Double(i) * 0.31)) / 2
+                    let height = max(4, size.height * (0.1 + amplitude * envelope * (0.6 + 0.4 * wave)))
+                    let rect = CGRect(x: CGFloat(i) * (width + gap), y: (size.height - height) / 2, width: width, height: height)
+                    context.fill(Path(roundedRect: rect, cornerRadius: width / 2), with: shading)
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: level)
+        .accessibilityHidden(true)
     }
 }
 

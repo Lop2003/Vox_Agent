@@ -45,9 +45,12 @@ import Testing
     #expect(try json(ClientMessage.cancel) == #"{"cancel":{}}"#)
 
     let decode = { (s: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(s.utf8)) }
-    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A","B"],"speech":true}}"#) == .hello(workspace: "app", agents: ["A", "B"], speech: true))
-    // Older bridges don't send "speech".
-    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A"]}}"#) == .hello(workspace: "app", agents: ["A"], speech: nil))
+    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A","B"],"speech":true,"workspaces":[{"id":"code","name":"app","agents":["A"]},{"id":"general","name":"General","agents":["B"]}]}}"#)
+        == .hello(workspace: "app", agents: ["A", "B"], speech: true, workspaces: [
+            AgentWorkspace(id: "code", name: "app", agents: ["A"]), AgentWorkspace(id: "general", name: "General", agents: ["B"]),
+        ]))
+    // Older bridges don't send "speech" or "workspaces".
+    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A"]}}"#) == .hello(workspace: "app", agents: ["A"], speech: nil, workspaces: nil))
     #expect(try decode(#"{"audio":{"id":"00000000-0000-0000-0000-000000000001","data":"AAEC"}}"#) == .audio(id: id, data: Data([0, 1, 2]), error: nil))
     #expect(try decode(#"{"audio":{"id":"00000000-0000-0000-0000-000000000001","error":"no"}}"#) == .audio(id: id, data: nil, error: "no"))
     #expect(try json(ClientMessage.speak(id: id, text: "hi")) == #"{"speak":{"id":"00000000-0000-0000-0000-000000000001","text":"hi"}}"#)
@@ -125,7 +128,11 @@ func bridgePairingRunAndCancel() async throws {
     client.connect(pairingCode: bridge.pairingCode.lowercased(), host: "127.0.0.1", port: bridge.port)
     await waitFor { client.isConnected }
     #expect(client.state == .connected(workspace: "ws"))
-    #expect(client.agents == ["Fast", "Slow"])
+    #expect(client.agents == ["Fast", "Slow", "Claude"]) // the default General agent is added
+    #expect(client.workspaces == [
+        AgentWorkspace(id: "code", name: "ws", agents: ["Fast", "Slow"]),
+        AgentWorkspace(id: "general", name: "General", agents: ["Claude"]),
+    ])
 
     var events: [AgentEvent] = []
     var result: (AgentStatus, String?)?

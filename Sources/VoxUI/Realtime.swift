@@ -1,8 +1,12 @@
 import AVFoundation
 import Foundation
+import SoundAnalysis
 
-/// Energy-based voice activity detection: learns the room's noise floor, notices speech, and reports the end
-/// of the user's turn after a short pause — much sooner than waiting for the recognizer to go quiet.
+/// Notices the user speaking and reports the end of their turn after a short pause — much sooner than waiting
+/// for the recognizer to go quiet. Two inputs:
+/// - `feed(confidence:)`: speech probability from `SpeechActivity` (preferred: ignores keyboards, fans, clicks).
+/// - `feed(_ level:)`: loudness vs. a learned noise floor (fallback when the classifier isn't available;
+///   steady noise is fine, but bursts like typing count as speech).
 struct EndOfTurnDetector {
     enum Event: Equatable { case none, speechStarted, endOfTurn }
 
@@ -14,6 +18,26 @@ struct EndOfTurnDetector {
     private(set) var noiseFloor: Float?
     private(set) var speaking = false
     private var lastVoice = Date.distantPast
+
+    // Hysteresis: confident to start, more lenient to keep going through soft syllables.
+    var startConfidence = 0.6
+    var keepConfidence = 0.35
+
+    mutating func feed(confidence: Double, at now: Date = Date()) -> Event {
+        if !speaking {
+            guard confidence >= startConfidence else { return .none }
+            speaking = true
+            lastVoice = now
+            return .speechStarted
+        }
+        if confidence >= keepConfidence {
+            lastVoice = now
+        } else if now.timeIntervalSince(lastVoice) >= pause {
+            speaking = false
+            return .endOfTurn
+        }
+        return .none
+    }
 
     mutating func feed(_ level: Float, at now: Date = Date()) -> Event {
         guard let floor = noiseFloor else {
@@ -45,6 +69,52 @@ struct EndOfTurnDetector {
         for i in 0..<Int(buffer.frameLength) { sum += samples[i] * samples[i] }
         let rms = (sum / Float(buffer.frameLength)).squareRoot()
         return rms > 0 ? 20 * log10(rms) : -160
+    }
+}
+
+/// "Is someone talking?" from Apple's on-device sound classifier (SoundAnalysis, built-in "speech" class).
+/// Measured on test clips: Thai speech found with or without noise mixed in; white noise and keyboard clicks
+/// stay at 0.20–0.27 confidence, while a loudness threshold took typing for speech and never ended the turn.
+final class SpeechActivity: NSObject, SNResultsObserving, @unchecked Sendable {
+    /// Speech confidence 0…1, about every 0.25 s (0.5 s windows, half overlapping). Called on a background queue.
+    var onConfidence: (@Sendable (Double) -> Void)?
+
+    private let request: SNClassifySoundRequest
+    private let queue = DispatchQueue(label: "voxagent.speech-activity")
+    private var analyzer: SNAudioStreamAnalyzer?
+    private var position: AVAudioFramePosition = 0
+
+    /// Nil if the classifier isn't available on this device (callers fall back to loudness).
+    init?(windowSeconds: Double = 0.5) {
+        guard let request = try? SNClassifySoundRequest(classifierIdentifier: .version1) else { return nil }
+        request.windowDuration = CMTime(seconds: windowSeconds, preferredTimescale: 1000)
+        request.overlapFactor = 0.5
+        self.request = request
+    }
+
+    /// Call from the audio tap. The buffer is copied: the engine reuses it once the tap returns.
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        guard let copy = buffer.copy() as? AVAudioPCMBuffer else { return }
+        let at = position
+        position += AVAudioFramePosition(buffer.frameLength)
+        queue.async { [self] in
+            if analyzer == nil {
+                let analyzer = SNAudioStreamAnalyzer(format: copy.format)
+                guard (try? analyzer.add(request, withObserver: self)) != nil else { return }
+                self.analyzer = analyzer
+            }
+            analyzer?.analyze(copy, atAudioFramePosition: at)
+        }
+    }
+
+    /// Flushes what's left and blocks until every result has been delivered.
+    func finish() {
+        queue.sync { analyzer?.completeAnalysis() }
+    }
+
+    func request(_ request: SNRequest, didProduce result: SNResult) {
+        guard let result = result as? SNClassificationResult else { return }
+        onConfidence?(result.classification(forIdentifier: "speech")?.confidence ?? 0)
     }
 }
 

@@ -37,6 +37,8 @@ By default the bridge offers Claude Code and Codex. Put a list in `~/.voxcode/ag
 - `"cli": "codex"` pointed at an OpenAI-compatible provider such as OpenRouter. Use only `-c`/`-m` args so follow-ups (`codex exec resume`) keep working.
 - `"cli": "ollama", "model": "qwen3:8b"` chats with a local model directly (streams, answers in the app's language). It can't read or edit files: small models driven through Codex ignore the reply language and invent results, so this mode tells the user to switch to Claude Code for real code work.
 
+**Workspaces.** The app switches between two workspaces, each with its own agents and chat history: the project folder (the agents above) and **General**, for everyday questions that have nothing to do with the code. Mark an agent `"workspace": "general"` to put it there. If none is marked, the bridge adds a General "Claude" that runs in an empty folder of its own (`general/` in the bridge home, `~/.voxcode` by default) with web search and fetch as its only tools (no MCP servers), so it can't touch your files or run commands.
+
 Answers come back in the app's speech language (Thai by default); the bridge states it at the start and end of every prompt.
 
 ## Mac app

@@ -11,5 +11,6 @@
       "-m", "qwen/qwen3-coder"
     ]
   },
-  { "name": "Qwen3 8B (local chat)", "cli": "ollama", "model": "qwen3:8b" }
+  { "name": "Qwen3 8B (local chat)", "cli": "ollama", "model": "qwen3:8b" },
+  { "name": "Claude", "cli": "claude", "workspace": "general" }
 ]

@@ -11,12 +11,15 @@
 // "cli": "claude" | "codex" drive those coding-agent CLIs (Codex can also reach OpenRouter etc. via -c/-m args).
 // "cli": "ollama" chats with a local model directly: no file access, but small models answer properly
 // (through Codex they ignore the reply language and invent results). See agents.example.json.
+// "workspace": "general" puts an agent in the General workspace: everyday questions, not the project.
+// It runs in an empty folder of its own and (for Claude) can only search the web. If agents.json has
+// no general agent, the default one (Claude) is added.
 //
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
 //   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?}} | {"cancel":{}} | {"reset":{}}
 //                 {"speak":{"id","text"}}
-//   bridge → app  {"hello":{"workspace","agents","speech"}}
+//   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}]}}
 //                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
 //                 {"event":{"id","event":{"status"|"activity"|"message"|"completed":{"_0":…}}}}
 //                 {"finished":{"id","status","error"?}}
@@ -36,7 +39,12 @@ const SERVICE_TYPE = '_voxcode._tcp';
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 // ponytail: fixed 15 min agent timeout; make it a flag if long refactors hit it.
 const TIMEOUT_MS = 15 * 60 * 1000;
-const DEFAULT_AGENTS = [{ name: 'Claude Code', cli: 'claude' }, { name: 'Codex', cli: 'codex' }];
+const GENERAL = 'general';
+const GENERAL_AGENT = { name: 'Claude', cli: 'claude', workspace: GENERAL };
+const DEFAULT_AGENTS = [{ name: 'Claude Code', cli: 'claude' }, { name: 'Codex', cli: 'codex' }, GENERAL_AGENT];
+// The General workspace answers questions; it has no business touching files or running commands,
+// nor using the MCP servers configured for coding (company knowledge bases, docs connectors…).
+export const GENERAL_CLAUDE_ARGS = ['--tools', 'WebSearch,WebFetch', '--strict-mcp-config'];
 
 // MARK: Pairing
 
@@ -83,7 +91,7 @@ export function buildPrompt({ text, workspace, activeFile, agent, isFollowUp, la
   return `# Vox Agent request${isFollowUp ? ' (follow-up in the same conversation)' : ''}
 ${language ? rule + '\n' : ''}
 ## User request
-Spoken by the user and converted with speech-to-text, so it may be informal, incomplete, or contain recognition errors:
+Spoken by the user and converted with speech-to-text, so it may be informal, incomplete, or contain recognition errors. English technical words spoken inside Thai often come out as Thai words that sound alike (e.g. "มาร์คดาว" = markdown, "รีดมี" = README, "ดีพลอย" = deploy): read them by sound.
 > ${text.replaceAll('\n', '\n> ')}
 
 ## Workspace
@@ -132,6 +140,22 @@ The user's project: ${path.basename(workspace)}
 ${context}
 You cannot read files, edit files or run commands. Never claim you checked or changed anything; if the question needs the actual code, answer what you can and suggest switching to Claude Code.
 Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); put any details under "## Result".`;
+}
+
+/// Instructions for the General workspace: an everyday assistant, not a coding agent.
+export function generalPrompt(language) {
+  return `You are Vox Agent, a voice assistant. The user talks to you by voice about anything: everyday questions, ideas, writing, explanations. This is not about a codebase; there are no project files. Use web search when the answer depends on current facts.
+${replyLanguageRule(language)}
+Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); put any details under "## Result".`;
+}
+
+/// The workspaces the app can switch between: the project folder and General, each with its own agents.
+export function workspacesFor(workspace, agents) {
+  const names = (general) => agents.filter((a) => (a.workspace === GENERAL) === general).map((a) => a.name);
+  return [
+    { id: 'code', name: path.basename(workspace), agents: names(false) },
+    { id: GENERAL, name: 'General', agents: names(true) },
+  ];
 }
 
 // MARK: Agent CLIs
@@ -225,8 +249,9 @@ export function parseCodex(line) {
 
 /// Runs one agent at a time in `workspace`, remembering each agent's session for follow-ups.
 export class AgentSession {
-  constructor(workspace, agents, emit) {
-    Object.assign(this, { workspace, agents, emit, sessions: new Map(), chats: new Map(), current: null });
+  /// `generalDir`: the empty folder General-workspace agents run in.
+  constructor(workspace, agents, emit, generalDir = path.join(os.tmpdir(), 'voxagent-general')) {
+    Object.assign(this, { workspace, agents, emit, generalDir, sessions: new Map(), chats: new Map(), current: null });
   }
 
   run({ id, text, agent: name, activeFile, language }) {
@@ -236,16 +261,21 @@ export class AgentSession {
     if (agent.cli === 'ollama') return this.chat({ id, text, agent, language });
 
     const sessionID = this.sessions.get(name);
-    const prompt = buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
+    const general = agent.workspace === GENERAL;
+    const cwd = general ? this.generalDir : this.workspace;
+    if (general) fs.mkdirSync(cwd, { recursive: true });
+    const prompt = general
+      ? `${generalPrompt(language)}\n\nThe user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}`
+      : buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
     const args = agent.cli === 'claude'
-      ? claudeArgs(prompt, sessionID, agent.args)
-      : codexArgs(prompt, sessionID, agent.args, this.workspace);
+      ? claudeArgs(prompt, sessionID, [...(general ? GENERAL_CLAUDE_ARGS : []), ...(agent.args ?? [])])
+      : codexArgs(prompt, sessionID, agent.args, cwd);
     const parse = agent.cli === 'claude' ? parseClaude : parseCodex;
     const command = agent.command ?? agent.cli;
 
     // detached: own process group, so cancelling also stops the tools the agent started.
     const child = spawn(command, args, {
-      cwd: this.workspace,
+      cwd,
       env: { ...process.env, ...agent.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
@@ -295,7 +325,8 @@ export class AgentSession {
     };
     run.timer = setTimeout(() => run.finish('Failed', `Timed out after ${TIMEOUT_MS / 60000} minutes.`), TIMEOUT_MS);
 
-    const history = this.chats.get(agent.name) ?? [{ role: 'system', content: chatSystemPrompt(this.workspace, language) }];
+    const system = agent.workspace === GENERAL ? generalPrompt(language) : chatSystemPrompt(this.workspace, language);
+    const history = this.chats.get(agent.name) ?? [{ role: 'system', content: system }];
     const messages = [...history, { role: 'user', content: text }];
     this.emit({ event: { id, event: ev('status', 'Analyzing') } });
 
@@ -398,13 +429,18 @@ export class SpeechServer {
 
 // MARK: Server
 
-function loadAgents(file) {
+export function loadAgents(file) {
   if (!file) return DEFAULT_AGENTS;
   const agents = JSON.parse(fs.readFileSync(file, 'utf8'));
   for (const a of agents) {
-    if (!a.name || !['claude', 'codex', 'ollama'].includes(a.cli) || (a.cli === 'ollama' && !a.model)) {
-      throw new Error(`Bad agent in ${file}: ${JSON.stringify(a)} (needs "name" and "cli": "claude" | "codex" | "ollama"; ollama also needs "model")`);
+    if (!a.name || !['claude', 'codex', 'ollama'].includes(a.cli) || (a.cli === 'ollama' && !a.model)
+      || ![undefined, GENERAL].includes(a.workspace)) {
+      throw new Error(`Bad agent in ${file}: ${JSON.stringify(a)} (needs "name" and "cli": "claude" | "codex" | "ollama"; ollama also needs "model"; "workspace" may only be "general")`);
     }
+  }
+  if (!agents.some((a) => a.workspace === GENERAL)) {
+    const taken = agents.some((a) => a.name === GENERAL_AGENT.name);
+    agents.push(taken ? { ...GENERAL_AGENT, name: 'Claude (General)' } : GENERAL_AGENT);
   }
   return agents;
 }
@@ -456,7 +492,8 @@ function main() {
     for (const socket of clients) socket.write(line);
     if (message.finished) log(`■ ${message.finished.status}${message.finished.error ? ': ' + message.finished.error : ''}`);
   };
-  const session = new AgentSession(workspace, agents, emit);
+  const session = new AgentSession(workspace, agents, emit, path.join(home, 'general'));
+  const workspaces = workspacesFor(workspace, agents);
   const speech = new SpeechServer();
   speech.start(); // warm up so the first answer isn't delayed by the interpreter starting
   const psk = pskFor(code);
@@ -471,7 +508,7 @@ function main() {
     clients.add(socket);
     log(`App connected: ${socket.remoteAddress}`);
     const send = (message) => socket.write(JSON.stringify(message) + '\n');
-    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available } });
+    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available, workspaces } });
     readline.createInterface({ input: socket }).on('line', (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }

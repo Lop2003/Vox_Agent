@@ -30,7 +30,24 @@ public final class AppModel {
     /// Shown when the user sends without a runner, e.g. "Choose a workspace folder first."
     public var runnerMissingMessage = "No agent available."
 
-    /// Selected agent name; falls back to the runner's first agent when it doesn't offer this one.
+    /// Workspaces from the runner (the project folder and General), each with its own agents and chats.
+    public var workspaces: [AgentWorkspace] { runner?.workspaces ?? [] }
+    /// Selected workspace id; falls back to the first one when the runner doesn't offer it.
+    /// Switching starts a new conversation, since chats belong to one workspace.
+    public var workspaceID: String {
+        get { workspaces.contains { $0.id == storedWorkspace } ? storedWorkspace : workspaces.first?.id ?? storedWorkspace }
+        set {
+            guard newValue != workspaceID else { return }
+            newConversation()
+            storedWorkspace = newValue
+        }
+    }
+    private var storedWorkspace = UserDefaults.standard.string(forKey: "workspace") ?? AgentWorkspace.code {
+        didSet { UserDefaults.standard.set(storedWorkspace, forKey: "workspace") }
+    }
+    public var inGeneralWorkspace: Bool { workspaceID == AgentWorkspace.general }
+
+    /// Selected agent name; falls back to the workspace's first agent when it doesn't offer this one.
     public var agent: String {
         get {
             let agents = self.agents
@@ -38,7 +55,7 @@ public final class AppModel {
         }
         set { storedAgent = newValue }
     }
-    public var agents: [String] { runner?.agents ?? [] }
+    public var agents: [String] { workspaces.first { $0.id == workspaceID }?.agents ?? [] }
     private var storedAgent = UserDefaults.standard.string(forKey: "agent") ?? "Claude Code" {
         didSet { UserDefaults.standard.set(storedAgent, forKey: "agent") }
     }
@@ -91,6 +108,14 @@ public final class AppModel {
     /// Characters of the recognizer's text that were our own echo, not the user.
     private var heardOffset = 0
     private var vad = EndOfTurnDetector()
+    /// Speech classifier for the open mic; nil when unavailable (then loudness drives end of turn).
+    private var activity: SpeechActivity?
+    /// Last time the classifier was sure someone was speaking.
+    private var lastSpeechHeard = Date.distantPast
+    /// Mic loudness 0…1 (smoothed) while in a call, for the waveform.
+    public private(set) var inputLevel: Double = 0
+    /// Muted in a call: the mic stays off (no listening, no interrupting) until unmuted; the call goes on.
+    public private(set) var micMuted = false
     /// What we said recently, to recognize it if the mic picks it up.
     private var recentSpeech = ""
     /// The answer is arriving token by token (local models): speak it sentence by sentence as it comes.
@@ -99,6 +124,10 @@ public final class AppModel {
 
     /// Saved chats, newest first (includes the current one once it has a turn).
     public private(set) var conversations: [Conversation]
+    /// Saved chats of the current workspace, newest first.
+    public var workspaceConversations: [Conversation] {
+        conversations.filter { ($0.workspace ?? AgentWorkspace.code) == workspaceID }
+    }
     public private(set) var conversationID = UUID()
     private let store: ChatStore
 
@@ -131,6 +160,30 @@ public final class AppModel {
         recognitionFailures = 0
         errorMessage = nil
         if phase == .idle { Task { await startListening() } }
+    }
+
+    /// Mute or unmute the mic during a call, like a phone's mute button. Muting drops what was being said.
+    public func toggleMute() {
+        micMuted.toggle()
+        if micMuted {
+            silenceTask?.cancel()
+            if micOpen {
+                closeMic()
+                stt.cancel()
+            }
+            if phase == .listening || phase == .transcribing {
+                transcript = ""
+                phase = .idle
+            }
+        } else if inCall, phase == .idle, !isSpeaking {
+            Task { await startListening() }
+        }
+    }
+
+    /// In a call: stop the agent's work or its voice and go back to listening, without hanging up.
+    public func interrupt() {
+        if phase == .running { runner?.cancel() } // finish(turn:) then listens again
+        tts.stop()                                 // speechFinished() then listens again
     }
 
     private func speechFinished() {
@@ -191,6 +244,7 @@ public final class AppModel {
     private func cue(for status: AgentStatus) -> String? {
         let thai = localeID.hasPrefix("th")
         switch status {
+        case .analyzing where inGeneralWorkspace: return thai ? "ขอคิดแป๊บนึง" : "Let me think"
         case .analyzing: return thai ? "กำลังดูโค้ด" : "Looking at the code"
         case .editing: return thai ? "กำลังแก้ไฟล์" : "Editing files"
         case .testing: return thai ? "กำลังรันเทส" : "Running checks"
@@ -211,6 +265,7 @@ public final class AppModel {
     /// - Parameter bargeIn: open the mic *while* the answer plays (call mode) only to catch the user cutting in.
     ///   The phase is left alone until real, non-echo words are heard.
     private func startListening(bargeIn: Bool = false) async {
+        if micMuted { return } // every automatic "listen again" path stops here while muted
         if micOpen {
             if !bargeIn, bargeInListening { // already listening for interruptions: it's the user's turn now
                 tts.stop()
@@ -235,9 +290,20 @@ public final class AppModel {
                 onText: { [weak self] text, isFinal in self?.received(text, isFinal: isFinal) },
                 onError: { [weak self] error in self?.recognitionFailed(error) }
             )
-            voice.echoCancellation = inCall && bargeInEnabled
+            // iPhone: always use voice processing (noise suppression). Mac: only when the mic must ignore our own voice.
+            #if os(iOS)
+            voice.voiceProcessing = true
+            #else
+            voice.voiceProcessing = inCall && bargeInEnabled
+            #endif
+            let activity = SpeechActivity()
+            activity?.onConfidence = { [weak self] confidence in
+                Task { @MainActor in self?.heard(confidence: confidence) }
+            }
+            self.activity = activity
             try voice.start { [weak self] buffer in
                 sink(buffer)
+                activity?.feed(buffer)
                 let level = EndOfTurnDetector.level(of: buffer)
                 Task { @MainActor in self?.heard(level: level) }
             }
@@ -261,13 +327,28 @@ public final class AppModel {
 
     private func closeMic() {
         voice.stop()
+        inputLevel = 0
+        activity = nil
         micOpen = false
         bargeInListening = false
     }
 
     /// Voice activity: end the turn as soon as the user pauses instead of waiting for the recognizer.
+    /// The speech classifier drives it when available; loudness is only the fallback.
+    private func heard(confidence: Double) {
+        guard micOpen else { return }
+        if confidence >= vad.startConfidence { lastSpeechHeard = Date() }
+        guard phase == .listening else { return }
+        if vad.feed(confidence: confidence) == .endOfTurn, !transcript.isEmpty { stopListening(send: shouldSend) }
+    }
+
     private func heard(level: Float) {
-        guard micOpen, phase == .listening else { return }
+        if inCall, micOpen {
+            // -60 dB (quiet room) … -15 dB (close speech) → 0…1; rise fast, fall slowly so the bars don't flicker.
+            let normalized = min(1, max(0, Double(level + 60) / 45))
+            inputLevel = max(normalized, inputLevel * 0.85)
+        }
+        guard micOpen, activity == nil, phase == .listening else { return }
         if vad.feed(level) == .endOfTurn, !transcript.isEmpty { stopListening(send: shouldSend) }
     }
 
@@ -295,6 +376,9 @@ public final class AppModel {
                 if isFinal { restartBargeIn() } // the recognizer ended its session; keep watching
                 return
             }
+            // Words the recognizer made out of noise: only cut in when the classifier also hears a voice.
+            // (Not marked as echo: the classifier may just be a moment behind; the next partial decides.)
+            if activity != nil, Date().timeIntervalSince(lastSpeechHeard) > 1.0 { return }
             // Real words over our own voice: stop talking (and the agent, if it's still writing) and listen.
             tts.stop()
             if phase == .running { runner?.cancel() }
@@ -446,6 +530,7 @@ public final class AppModel {
     /// Stops whatever is happening and hangs up a call.
     public func cancel() {
         inCall = false
+        micMuted = false
         narration = nil
         if micOpen {
             closeMic()
@@ -494,7 +579,7 @@ public final class AppModel {
     private func persist() {
         guard !turns.isEmpty else { return }
         conversations.removeAll { $0.id == conversationID }
-        conversations.insert(Conversation(id: conversationID, turns: turns, updatedAt: Date()), at: 0)
+        conversations.insert(Conversation(id: conversationID, turns: turns, updatedAt: Date(), workspace: workspaceID), at: 0)
         store.save(conversations)
     }
 

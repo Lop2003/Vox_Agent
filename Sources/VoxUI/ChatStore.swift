@@ -6,6 +6,8 @@ public struct Conversation: Identifiable, Codable, Equatable {
     public var id: UUID
     public var turns: [Turn]
     public var updatedAt: Date
+    /// `AgentWorkspace.id` the chat belongs to; nil for chats saved before workspaces (the project workspace).
+    public var workspace: String?
 
     public var title: String { turns.first?.user ?? "New conversation" }
 }

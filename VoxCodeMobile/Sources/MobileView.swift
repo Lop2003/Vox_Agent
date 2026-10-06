@@ -47,7 +47,7 @@ struct MobileView: View {
             ZStack(alignment: .leading) {
                 NavigationStack {
                     ConversationView(model: model, emptyHint: bridge.isConnected
-                        ? "พิมพ์ แตะไมค์ หรือกด 〰️ เพื่อคุยแบบโทรศัพท์"
+                        ? model.inGeneralWorkspace ? "ถามอะไรก็ได้ พิมพ์ แตะไมค์ หรือกด 〰️ เพื่อคุยแบบโทรศัพท์" : "พิมพ์ แตะไมค์ หรือกด 〰️ เพื่อคุยแบบโทรศัพท์"
                         : "Run the Vox Agent bridge on your computer, then tap the title to pair.")
                         .safeAreaInset(edge: .bottom, spacing: 0) { Composer(model: model) }
                         .navigationBarTitleDisplayMode(.inline)
@@ -76,9 +76,6 @@ struct MobileView: View {
             }
             .animation(.snappy(duration: 0.3), value: sidebarOpen)
             .animation(.interactiveSpring, value: drag)
-        }
-        .fullScreenCover(isPresented: Binding(get: { model.inCall }, set: { if !$0, model.inCall { model.toggleCall() } })) {
-            CallView(model: model)
         }
         .onAppear {
             model.runner = bridge
@@ -129,22 +126,25 @@ struct MobileView: View {
                 Divider()
                 Button("Pair…", systemImage: "link") { showPairing = true }
             } label: {
-                VStack(spacing: 1) {
+                // Concrete colors, not `.primary`/`.secondary` styles: inside a toolbar Menu those inherit the
+                // accent tint on iOS 18 and the title turns blue.
+                VStack(spacing: 2) {
                     HStack(spacing: 4) {
                         Text(model.agents.isEmpty ? "Vox Agent" : model.agent).lineLimit(1)
-                        Image(systemName: "chevron.down").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                        Image(systemName: "chevron.down").font(.caption2.weight(.bold)).foregroundStyle(Color.secondary)
                     }
-                    .font(.headline)
-                    .foregroundStyle(.primary)
+                    .font(.subheadline.weight(.semibold)) // two lines must fit the 44 pt bar with room above and below
+                    .foregroundStyle(Color.primary)
                     HStack(spacing: 4) {
                         Circle().fill(connectionColor).frame(width: 6, height: 6)
                         Text(connectionText).lineLimit(1).truncationMode(.middle)
                     }
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
                 }
                 .frame(maxWidth: 240)
             }
+            .tint(Color.primary)
             .accessibilityLabel("Agent: \(model.agent)")
         }
         ToolbarItem(placement: .topBarTrailing) {
@@ -182,7 +182,8 @@ struct MobileView: View {
         case .disconnected: "Not connected"
         case .searching: "Searching…"
         case .connecting: "Connecting…"
-        case .connected(let workspace): workspace
+        // Show which workspace you're in (the project or General), not only which folder the bridge serves.
+        case .connected(let folder): model.workspaces.first { $0.id == model.workspaceID }?.name ?? folder
         case .waiting: "Reconnecting…"
         case .failed: "Can't connect — tap to fix"
         }
@@ -222,13 +223,36 @@ struct Composer: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            // Agent progress already shows on its card; the chip only covers dictation.
-            if model.phase == .listening || model.phase == .transcribing {
+            // Agent progress already shows on its card; the chip only covers dictation (calls show it in the bar).
+            if !model.inCall, model.phase == .listening || model.phase == .transcribing {
                 statusChip
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
+            if model.inCall {
+                callBar
+            } else {
+                inputPill
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .frame(maxWidth: contentMaxWidth)
+        .frame(maxWidth: .infinity)
+        .background {
+            // Fade the conversation out under the floating composer.
+            LinearGradient(colors: [Color(.systemBackground).opacity(0), Color(.systemBackground)], startPoint: .top, endPoint: .center)
+                .ignoresSafeArea()
+        }
+        .animation(.snappy, value: model.phase)
+        .animation(.snappy, value: model.inCall)
+        .animation(.snappy, value: hasText)
+        .animation(.snappy, value: model.errorMessage)
+    }
+
+    private var inputPill: some View {
             HStack(alignment: .bottom, spacing: 4) {
                 TextField(listening ? "Listening…" : "Ask Vox Agent", text: Bindable(model).transcript, axis: .vertical)
                     .focused($focused)
@@ -261,20 +285,127 @@ struct Composer: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(.primary.opacity(0.08)))
             .shadow(color: .black.opacity(0.08), radius: 16, y: 6)
+            .transition(.opacity)
+    }
+
+    // MARK: Call bar
+
+    private var thai: Bool { model.localeID.hasPrefix("th") }
+
+    private var callMood: CallWaveform.Mood {
+        if model.micMuted, model.phase == .idle, !model.isSpeaking { return .idle }
+        return switch model.phase {
+        case .listening: .listening
+        case .transcribing, .running: .working
+        case .idle: model.isSpeaking ? .speaking : .idle
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .frame(maxWidth: contentMaxWidth)
-        .frame(maxWidth: .infinity)
-        .background {
-            // Fade the conversation out under the floating composer.
-            LinearGradient(colors: [Color(.systemBackground).opacity(0), Color(.systemBackground)], startPoint: .top, endPoint: .center)
-                .ignoresSafeArea()
+    }
+
+    private var callStatus: String {
+        if model.micMuted, model.phase == .idle, !model.isSpeaking { return thai ? "ปิดไมค์อยู่" : "Muted" }
+        return switch model.phase {
+        case .listening: thai ? "กำลังฟัง…" : "Listening…"
+        case .transcribing: thai ? "รับทราบ…" : "Got it…"
+        case .running: (thai ? "กำลังทำงาน · " : "Working · ") + model.currentStatus.rawValue
+        case .idle: model.isSpeaking ? (thai ? "กำลังตอบ…" : "Speaking…") : (thai ? "กำลังเชื่อมต่อ…" : "Connecting…")
         }
-        .animation(.snappy, value: model.phase)
-        .animation(.snappy, value: hasText)
-        .animation(.snappy, value: model.errorMessage)
+    }
+
+    /// Live transcript while listening, the agent's current step while it works.
+    private var callDetail: String {
+        switch model.phase {
+        case .listening, .transcribing: model.transcript
+        case .running: model.turns.last?.activity.last ?? ""
+        case .idle: ""
+        }
+    }
+
+    /// In a call the input pill becomes this bar; the chat stays on screen above it.
+    private var callBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle().fill(model.micMuted ? .orange : .green).frame(width: 8, height: 8)
+                Text(callStatus).font(.footnote.weight(.semibold)).contentTransition(.opacity)
+                Spacer(minLength: 8)
+                Label(model.agent, systemImage: "sparkles").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+
+            CallWaveform(mood: callMood, level: model.inputLevel)
+                .frame(height: 40)
+
+            if !callDetail.isEmpty {
+                Text(callDetail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
+
+            HStack(spacing: 10) {
+                muteButton
+                callAction
+                Spacer(minLength: 8)
+                Button(action: model.toggleCall) {
+                    Label(thai ? "วางสาย" : "End", systemImage: "phone.down.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 40)
+                        .background(Color.red, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("End call")
+            }
+        }
+        .padding(16)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(.primary.opacity(0.08)))
+        .shadow(color: .black.opacity(0.08), radius: 16, y: 6)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.2), value: callDetail)
+    }
+
+    private var muteButton: some View {
+        Button(action: model.toggleMute) {
+            Image(systemName: model.micMuted ? "mic.slash.fill" : "mic.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(model.micMuted ? Color.white : Color.primary)
+                .frame(width: 40, height: 40)
+                .background(model.micMuted ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color(.tertiarySystemFill)), in: Circle())
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(model.micMuted ? "Unmute microphone" : "Mute microphone")
+    }
+
+    /// Done talking while listening; stop the agent or its voice (and listen again); otherwise talk now.
+    @ViewBuilder private var callAction: some View {
+        switch model.phase {
+        case .listening:
+            pillButton(thai ? "ส่งเลย" : "Send now", systemImage: "arrow.up", action: model.toggleListening)
+        case .running:
+            pillButton(thai ? "หยุด" : "Stop", systemImage: "stop.fill", action: model.interrupt)
+        case .idle where model.isSpeaking:
+            pillButton(thai ? "หยุดพูด" : "Stop talking", systemImage: "stop.fill", action: model.interrupt)
+        case .idle where model.micMuted:
+            EmptyView() // the mute button is the way back
+        case .idle:
+            pillButton(thai ? "พูด" : "Talk", systemImage: "waveform", action: model.toggleListening)
+        case .transcribing:
+            pillButton(thai ? "รอสักครู่" : "One moment", systemImage: "ellipsis", action: {}).disabled(true)
+        }
+    }
+
+    private func pillButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .frame(height: 40)
+                .background(Color(.tertiarySystemFill), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Send when there is text, stop while working, otherwise start a hands-free call.
@@ -325,129 +456,6 @@ struct Composer: View {
     }
 }
 
-// MARK: - Call
-
-/// Full-screen hands-free call: listens, sends when you pause, narrates, reads the answer, listens again.
-struct CallView: View {
-    let model: AppModel
-
-    private var thai: Bool { model.localeID.hasPrefix("th") }
-    private var active: Bool { model.phase == .listening || model.isSpeaking }
-
-    private var status: String {
-        switch model.phase {
-        case .listening: thai ? "กำลังฟัง…" : "Listening…"
-        case .transcribing: thai ? "รับทราบ…" : "Got it…"
-        case .running: (thai ? "กำลังทำงาน · " : "Working · ") + model.currentStatus.rawValue
-        case .idle: model.isSpeaking ? (thai ? "กำลังตอบ…" : "Speaking…") : (thai ? "เชื่อมต่อ…" : "Connecting…")
-        }
-    }
-
-    /// Live transcript while listening, otherwise what the agent is doing or saying.
-    private var detail: String {
-        if model.phase == .listening || model.phase == .transcribing { return model.transcript }
-        guard let turn = model.turns.last else { return "" }
-        if model.phase == .running { return turn.activity.last ?? "" }
-        return SpeechText.speakable(from: turn.response)
-    }
-
-    var body: some View {
-        ZStack {
-            LinearGradient(colors: [Color(red: 0.06, green: 0.07, blue: 0.16), .black], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-
-            VStack(spacing: 20) {
-                Label(model.agent, systemImage: "sparkles")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(.top, 12)
-
-                Spacer()
-
-                Orb(active: active, working: model.phase == .running, listening: model.phase == .listening)
-                    .frame(width: 200, height: 200)
-
-                Text(status)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .contentTransition(.opacity)
-                    .animation(.default, value: status)
-
-                Text(detail.isEmpty ? " " : detail)
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.65))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(4)
-                    .padding(.horizontal, 32)
-                    .frame(minHeight: 80, alignment: .top)
-
-                if let error = model.errorMessage {
-                    Text(error).font(.footnote).foregroundStyle(.red).multilineTextAlignment(.center).padding(.horizontal)
-                }
-
-                Spacer()
-
-                HStack(spacing: 56) {
-                    // Cut in while it talks, or finish your sentence early.
-                    callButton(model.phase == .listening ? "arrow.up" : "mic.fill",
-                               label: model.phase == .listening ? "Done speaking" : "Talk now",
-                               background: .white.opacity(0.15), action: model.toggleListening)
-                        .disabled(model.phase == .running || model.phase == .transcribing)
-                        .opacity(model.phase == .running || model.phase == .transcribing ? 0.4 : 1)
-                    callButton("phone.down.fill", label: "End call", background: .red, action: model.toggleCall)
-                }
-                .padding(.bottom, 24)
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-
-    private func callButton(_ systemImage: String, label: String, background: Color, action: @escaping () -> Void) -> some View {
-        VStack(spacing: 8) {
-            Button(action: action) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 72, height: 72)
-                    .background(background, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(label)
-            Text(label).font(.caption).foregroundStyle(.white.opacity(0.7))
-        }
-    }
-}
-
-/// Breathing gradient orb: calm when idle, pulsing while listening or speaking, spinning while the agent works.
-struct Orb: View {
-    let active: Bool
-    let working: Bool
-    let listening: Bool
-
-    var body: some View {
-        let colors: [Color] = listening ? [.cyan, .blue, .purple] : [.purple, .pink, .orange]
-        ZStack {
-            Circle()
-                .fill(AngularGradient(colors: colors + [colors[0]], center: .center))
-                .blur(radius: 30)
-                .opacity(0.7)
-                .phaseAnimator([false, true]) { view, phase in
-                    view.scaleEffect(active && phase ? 1.15 : 0.95)
-                } animation: { _ in .easeInOut(duration: 1.1) }
-            Circle()
-                .fill(AngularGradient(colors: colors + [colors[0]], center: .center))
-                .padding(28)
-                .phaseAnimator([0.0, 360.0]) { view, angle in
-                    view.rotationEffect(.degrees(working ? angle : 0))
-                } animation: { _ in working ? .linear(duration: 2.5) : .default }
-            Circle()
-                .fill(.white.opacity(0.12))
-                .padding(28)
-        }
-        .animation(.easeInOut, value: listening)
-    }
-}
-
 // MARK: - Sidebar
 
 /// Slide-out sidebar: start a new conversation or reopen a saved one. Swipe a chat left to delete it.
@@ -464,6 +472,17 @@ struct Sidebar: View {
             .padding(.horizontal, 16)
             .padding(.top, 12)
             .padding(.bottom, 16)
+
+            if model.workspaces.count > 1 {
+                // Project work vs. general questions: each has its own agents and chats.
+                Picker("Workspace", selection: Binding(get: { model.workspaceID }, set: { model.workspaceID = $0 })) {
+                    ForEach(model.workspaces) { Text($0.name).tag($0.id) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(model.phase == .running)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            }
 
             Button {
                 model.newConversation()
@@ -487,7 +506,7 @@ struct Sidebar: View {
                 .padding(.top, 22)
                 .padding(.bottom, 4)
 
-            if model.conversations.isEmpty {
+            if model.workspaceConversations.isEmpty {
                 Text("Your chats will appear here.")
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
@@ -496,7 +515,7 @@ struct Sidebar: View {
                 Spacer()
             } else {
                 List {
-                    ForEach(model.conversations) { conversation in
+                    ForEach(model.workspaceConversations) { conversation in
                         Button {
                             model.open(conversation)
                             close()

@@ -7,6 +7,7 @@ import VoxCodeCore
 @MainActor
 private final class FakeRunner: AgentRunner {
     var agents = ["Fake"]
+    lazy var workspaces = [AgentWorkspace(id: AgentWorkspace.code, name: "Workspace", agents: agents)]
     var resets = 0
     func run(_ text: String, agent: String, activeFile: String?, language: String?,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
@@ -46,6 +47,30 @@ struct ChatHistoryTests {
         #expect(relaunched.conversations.last?.turns.map(\.user) == ["hello", "again"])
         #expect(relaunched.conversations.last?.turns.first?.response == "## Summary\nanswer to hello")
         #expect(relaunched.turns.isEmpty) // starts on a new chat
+    }
+
+    @Test func workspacesHaveTheirOwnAgentsAndChats() {
+        let (model, runner) = model()
+        runner.workspaces = [
+            AgentWorkspace(id: AgentWorkspace.code, name: "app", agents: ["Fake"]),
+            AgentWorkspace(id: AgentWorkspace.general, name: "General", agents: ["Chat"]),
+        ]
+        defer { model.workspaceID = AgentWorkspace.code }
+        model.workspaceID = AgentWorkspace.code
+        ask(model, "fix the build")
+
+        model.workspaceID = AgentWorkspace.general
+        #expect(model.turns.isEmpty) // switching starts a new chat
+        #expect(model.agent == "Chat")
+        #expect(model.workspaceConversations.isEmpty)
+        ask(model, "plan a trip")
+        #expect(model.turns.last?.agent == "Chat")
+        #expect(model.workspaceConversations.map(\.title) == ["plan a trip"])
+
+        model.workspaceID = AgentWorkspace.code
+        #expect(model.agent == "Fake")
+        #expect(model.workspaceConversations.map(\.title) == ["fix the build"])
+        #expect(AppModel(store: store).conversations.count == 2) // both saved, each tagged with its workspace
     }
 
     @Test func openingAChatShowsItsTurnsAndResetsTheAgent() {
@@ -127,5 +152,19 @@ struct StreamingSpeechTests {
         model.transcript = "hello"
         model.send()
         #expect(model.spokenLog == ["answer to hello"])
+    }
+}
+
+@MainActor
+struct MuteTests {
+    @Test func muteTogglesAndHangingUpUnmutes() {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.toggleMute()
+        #expect(model.micMuted)
+        model.toggleMute()
+        #expect(!model.micMuted)
+        model.toggleMute()
+        model.cancel() // ending the call resets mute for the next one
+        #expect(!model.micMuted)
     }
 }

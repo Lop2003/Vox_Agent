@@ -13,6 +13,8 @@ struct ContentView: View {
         VStack(spacing: 0) {
             ConversationView(model: model, emptyHint: workspace == nil
                 ? "Choose a workspace, then press the microphone and speak."
+                : model.inGeneralWorkspace
+                ? "Ask anything — e.g. “ช่วยวางแผนเที่ยวเชียงใหม่ 3 วันให้หน่อย”"
                 : "Press the microphone and speak — e.g. “ช่วยตรวจสอบ login rate limit ให้หน่อย”")
             Divider()
             StatusBar(model: model)
@@ -82,17 +84,26 @@ struct ContentView: View {
             .disabled(model.phase == .running)
         }
         ToolbarItem(placement: .principal) {
-            Picker("Agent", selection: $model.agent) {
-                ForEach(model.agents, id: \.self) { Text($0).tag($0) }
+            HStack {
+                if model.workspaces.count > 1 {
+                    Picker("Workspace", selection: $model.workspaceID) {
+                        ForEach(model.workspaces) { Text($0.name).tag($0.id) }
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Project work or general questions; each has its own agents and chats")
+                }
+                Picker("Agent", selection: $model.agent) {
+                    ForEach(model.agents, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.menu)
             }
-            .pickerStyle(.menu)
             .fixedSize()
             .disabled(model.phase == .running)
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
-                if model.conversations.isEmpty { Text("No saved chats") }
-                ForEach(model.conversations.prefix(30)) { conversation in
+                if model.workspaceConversations.isEmpty { Text("No saved chats") }
+                ForEach(model.workspaceConversations.prefix(30)) { conversation in
                     Button(conversation.title) { model.open(conversation) }
                 }
             } label: {

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildPrompt, replyLanguageRule, codexArgs, describeWorkspace, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS } from './voxcode-bridge.mjs';
+import { buildPrompt, replyLanguageRule, codexArgs, describeWorkspace, generalPrompt, loadAgents, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS, workspacesFor } from './voxcode-bridge.mjs';
 
 test('claude stream-json parsing', () => {
   assert.deepEqual(parseClaude('{"type":"system","subtype":"init","session_id":"s1"}'), [{ session: { _0: 's1' } }]);
@@ -52,6 +52,24 @@ test('prompt and workspace context', () => {
   assert.ok(thai.split('\n')[1] === rule, 'rule right after the title');
   assert.ok(thai.endsWith(rule), 'and as the very last line');
   assert.equal(replyLanguageRule('en-US'), 'Reply in English.');
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('agents split into the project workspace and General', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vox-'));
+  const file = path.join(dir, 'agents.json');
+  fs.writeFileSync(file, JSON.stringify([{ name: 'Claude', cli: 'claude' }, { name: 'Codex', cli: 'codex' }]));
+  const agents = loadAgents(file); // no general agent configured: the default one is added, renamed to stay unique
+  assert.deepEqual(workspacesFor('/x/myapp', agents), [
+    { id: 'code', name: 'myapp', agents: ['Claude', 'Codex'] },
+    { id: 'general', name: 'General', agents: ['Claude (General)'] },
+  ]);
+  fs.writeFileSync(file, JSON.stringify([{ name: 'Codex', cli: 'codex' }, { name: 'Chat', cli: 'ollama', model: 'qwen3:8b', workspace: 'general' }]));
+  assert.deepEqual(workspacesFor('/x/myapp', loadAgents(file))[1].agents, ['Chat']); // configured: kept as is
+  fs.writeFileSync(file, JSON.stringify([{ name: 'Codex', cli: 'codex', workspace: 'other' }]));
+  assert.throws(() => loadAgents(file), /workspace/);
+  assert.ok(!generalPrompt('th-TH').includes('software engineering'));
+  assert.ok(generalPrompt('th-TH').includes('ตอบเป็นภาษาไทย'));
   fs.rmSync(dir, { recursive: true });
 });
 
