@@ -12,14 +12,17 @@
 // "cli": "ollama" chats with a local model directly: no file access, but small models answer properly
 // (through Codex they ignore the reply language and invent results). See agents.example.json.
 // "workspace": "general" puts an agent in the General workspace: everyday questions, not the project.
-// It runs in an empty folder of its own and (for Claude) can only search the web. If agents.json has
-// no general agent, the default one (Claude) is added.
+// It runs in an empty folder of its own, can only search the web, and is tuned to answer fast: no extended
+// thinking (Claude) or low reasoning (Codex) unless the app asks for an effort. If agents.json has no general
+// agent, the default one (Claude) is added.
 //
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
-//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?}} | {"cancel":{}} | {"reset":{}}
+//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?,"mode"?,"effort"?,"model"?,"interrupted"?}} | {"cancel":{}} | {"reset":{}}
+//                 mode: "manual" | "auto" | "full" (permissions); effort: "low" | "medium" | "high" | "max"
+//                 interrupted: the user cut the previous answer off; what they heard of it ("" = nothing)
 //                 {"speak":{"id","text"}}
-//   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}]}}
+//   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}],"models":{agent:[{"id","name"}]}}}
 //                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
 //                 {"event":{"id","event":{"status"|"activity"|"message"|"completed":{"_0":…}}}}
 //                 {"finished":{"id","status","error"?}}
@@ -41,10 +44,14 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 const TIMEOUT_MS = 15 * 60 * 1000;
 const GENERAL = 'general';
 const GENERAL_AGENT = { name: 'Claude', cli: 'claude', workspace: GENERAL };
-const DEFAULT_AGENTS = [{ name: 'Claude Code', cli: 'claude' }, { name: 'Codex', cli: 'codex' }, GENERAL_AGENT];
+const DEFAULT_AGENTS = [{ name: 'Claude Code', cli: 'claude' }, { name: 'Codex', cli: 'codex' }, GENERAL_AGENT,
+  { name: 'GPT', cli: 'codex', workspace: GENERAL }];
 // The General workspace answers questions; it has no business touching files or running commands,
 // nor using the MCP servers configured for coding (company knowledge bases, docs connectors…).
-export const GENERAL_CLAUDE_ARGS = ['--tools', 'WebSearch,WebFetch', '--strict-mcp-config'];
+// No settings sources either: the user's hooks and plugins are for their coding sessions (and slow startup).
+// Partial messages: the answer streams in as it is written, so the app starts speaking after the first sentence.
+export const GENERAL_CLAUDE_ARGS = ['--tools', 'WebSearch,WebFetch', '--strict-mcp-config', '--setting-sources', '',
+  '--include-partial-messages'];
 
 // MARK: Pairing
 
@@ -144,9 +151,19 @@ Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); 
 
 /// Instructions for the General workspace: an everyday assistant, not a coding agent.
 export function generalPrompt(language) {
-  return `You are Vox Agent, a voice assistant. The user talks to you by voice about anything: everyday questions, ideas, writing, explanations. This is not about a codebase; there are no project files. Use web search when the answer depends on current facts.
+  return `You are Vox Agent, a voice assistant. The user talks to you by voice about anything: everyday questions, ideas, writing, explanations. This is not about a codebase; there are no project files. Use web search only when the answer depends on current facts.
 ${replyLanguageRule(language)}
-Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); put any details under "## Result".`;
+Everything you write is read aloud, so talk the way a person does in conversation: answer straight away in 1–3 short sentences, no headings, lists, tables or Markdown, and go into detail only when asked.
+The user may cut you off mid-answer; then you are told how much they heard. Respond to what they say now, without repeating what they already heard.`;
+}
+
+/// Added to the prompt after the user cut the previous answer off, so the agent knows what they actually heard.
+export function interruptionNote(heard) {
+  if (typeof heard !== 'string') return '';
+  const tail = heard.trim().slice(-400);
+  return tail
+    ? `\n\n(The user interrupted your previous answer. They heard only up to: "…${tail}")`
+    : '\n\n(The user interrupted before hearing any of your previous answer.)';
 }
 
 /// The workspaces the app can switch between: the project folder and General, each with its own agents.
@@ -156,6 +173,43 @@ export function workspacesFor(workspace, agents) {
     { id: 'code', name: path.basename(workspace), agents: names(false) },
     { id: GENERAL, name: 'General', agents: names(true) },
   ];
+}
+
+// MARK: Models
+
+const CLAUDE_MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']]
+  .map(([id, name]) => ({ id, name }));
+
+/// Models Codex offers in its own picker (its cache of the account's models), best first.
+export function codexModels(home = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')) {
+  try {
+    const { models } = JSON.parse(fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8'));
+    return models.filter((m) => m.visibility === 'list').sort((a, b) => a.priority - b.priority)
+      .map((m) => ({ id: m.slug, name: m.display_name ?? m.slug }));
+  } catch {
+    return [];
+  }
+}
+
+/// Chat models installed in Ollama (embedding models can't chat).
+export async function ollamaModels(host = 'http://localhost:11434') {
+  try {
+    const response = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(1500) });
+    const { models } = await response.json();
+    return models.map((m) => m.name).filter((n) => !n.includes('embed')).map((n) => ({ id: n, name: n }));
+  } catch {
+    return [];
+  }
+}
+
+/// The models the app may pick for each agent. Empty when the agent's args pin one (e.g. a provider + `-m`).
+export function modelsFor(agent, ollama = []) {
+  if (Array.isArray(agent.models)) return agent.models.map((m) => (typeof m === 'string' ? { id: m, name: m } : m));
+  if ((agent.args ?? []).some((a) => a === '-m' || a === '--model')) return [];
+  if (agent.cli === 'claude') return CLAUDE_MODELS;
+  if (agent.cli === 'codex') return codexModels();
+  if (agent.cli === 'ollama') return ollama;
+  return [];
 }
 
 // MARK: Agent CLIs
@@ -172,15 +226,40 @@ function statusForCommand(command) {
   return checks.some((k) => c.includes(k)) ? 'Testing' : 'Analyzing';
 }
 
-export function claudeArgs(prompt, sessionID, extra = []) {
-  return ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto',
-    ...(sessionID ? ['--resume', sessionID] : []), ...extra];
+// Only these values ever reach a command line.
+const MODES = ['manual', 'auto', 'full'];
+const EFFORTS = ['low', 'medium', 'high', 'max'];
+export const sanitizeOptions = ({ mode, effort } = {}) => ({
+  mode: MODES.includes(mode) ? mode : 'auto',
+  effort: EFFORTS.includes(effort) ? effort : undefined,
+});
+
+/// manual: edits allowed, shell commands need approval (none headless) · auto: Claude's safety classifier · full: no checks.
+/// `options.fast`: no extended thinking unless an effort was chosen (the General workspace's quick answers).
+export function claudeArgs(prompt, sessionID, extra = [], options = {}) {
+  const { mode, effort } = sanitizeOptions(options);
+  const fast = options.fast && !effort ? ['--settings', '{"alwaysThinkingEnabled":false}'] : [];
+  const permissions = mode === 'full' ? ['--dangerously-skip-permissions']
+    : ['--permission-mode', mode === 'manual' ? 'acceptEdits' : 'auto'];
+  // options.model is already checked against the agent's list; last so it wins over the agent's own --model.
+  return ['-p', prompt, '--output-format', 'stream-json', '--verbose', ...permissions,
+    ...(effort ? ['--effort', effort] : []), ...fast, ...(sessionID ? ['--resume', sessionID] : []), ...extra,
+    ...(options.model ? ['--model', options.model] : [])];
 }
 
-export function parseClaude(line) {
+/// `state` (one per run) collects streamed text when Claude runs with --include-partial-messages.
+export function parseClaude(line, state = {}) {
   let o;
   try { o = JSON.parse(line); } catch { return []; }
   switch (o.type) {
+    case 'stream_event': {
+      const e = o.event ?? {};
+      if (e.type === 'message_start') state.text = '';
+      if (e.type !== 'content_block_delta' || e.delta?.type !== 'text_delta') return [];
+      state.text = (state.text ?? '') + (e.delta.text ?? '');
+      const text = state.text.trim();
+      return text ? [ev('message', text)] : [];
+    }
     case 'system':
       return o.subtype === 'init' && o.session_id ? [ev('session', o.session_id)] : [];
     case 'assistant':
@@ -213,10 +292,17 @@ export function parseClaude(line) {
 }
 
 /// `exec resume` has no -s/-C flags, so extra args must be `-c`/`-m` style to work on follow-ups too.
-export function codexArgs(prompt, sessionID, extra = [], workspace) {
+/// The agent's own args come last so an agent can pin its reasoning (e.g. "none" for a small local model).
+/// `options.fast`: read-only, and low reasoning unless an effort was chosen (the General workspace).
+export function codexArgs(prompt, sessionID, extra = [], workspace, options = {}) {
+  const { mode, effort } = sanitizeOptions(options);
+  const sandbox = options.fast ? 'read-only' : mode === 'full' ? 'danger-full-access' : 'workspace-write';
+  const level = effort ?? (options.fast ? 'low' : undefined);
+  const reasoning = level ? ['-c', `model_reasoning_effort="${level === 'max' ? 'xhigh' : level}"`] : [];
+  const model = options.model ? ['-m', options.model] : [];
   return sessionID
-    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"', ...extra, sessionID, prompt]
-    : ['exec', '--json', '--skip-git-repo-check', '-s', 'workspace-write', ...extra, '-C', workspace, prompt];
+    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`, ...reasoning, ...model, ...extra, sessionID, prompt]
+    : ['exec', '--json', '--skip-git-repo-check', '-s', sandbox, ...reasoning, ...model, ...extra, '-C', workspace, prompt];
 }
 
 export function parseCodex(line) {
@@ -251,26 +337,38 @@ export function parseCodex(line) {
 export class AgentSession {
   /// `generalDir`: the empty folder General-workspace agents run in.
   constructor(workspace, agents, emit, generalDir = path.join(os.tmpdir(), 'voxagent-general')) {
-    Object.assign(this, { workspace, agents, emit, generalDir, sessions: new Map(), chats: new Map(), current: null });
+    Object.assign(this, { workspace, agents, emit, generalDir, sessions: new Map(), chats: new Map(), current: null, ollama: [] });
   }
 
-  run({ id, text, agent: name, activeFile, language }) {
+  /// The models offered for every agent (sent to the app in hello).
+  models() {
+    return Object.fromEntries(this.agents.map((a) => [a.name, modelsFor(a, this.ollama)]));
+  }
+
+  run({ id, text, agent: name, activeFile, language, mode, effort, model: requestedModel, interrupted }) {
     if (this.current) return this.emit({ finished: { id, status: 'Failed', error: 'The agent is already running.' } });
     const agent = this.agents.find((a) => a.name === name);
     if (!agent) return this.emit({ finished: { id, status: 'Failed', error: `Unknown agent: ${name}` } });
-    if (agent.cli === 'ollama') return this.chat({ id, text, agent, language });
+    // Only a model from the agent's own list ever reaches a command line.
+    const model = modelsFor(agent, this.ollama).some((m) => m.id === requestedModel) ? requestedModel : undefined;
+    const note = interruptionNote(interrupted);
+    if (agent.cli === 'ollama') return this.chat({ id, text: text + note, agent: model ? { ...agent, model } : agent, language });
 
     const sessionID = this.sessions.get(name);
     const general = agent.workspace === GENERAL;
     const cwd = general ? this.generalDir : this.workspace;
     if (general) fs.mkdirSync(cwd, { recursive: true });
-    const prompt = general
-      ? `${generalPrompt(language)}\n\nThe user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}`
-      : buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
+    const said = `The user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}${note}`;
+    // General Claude gets its instructions as the system prompt, replacing Claude Code's long coding one.
+    const prompt = !general ? buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language }) + note
+      : agent.cli === 'claude' ? said : `${generalPrompt(language)}\n\n${said}`;
+    // General-workspace agents keep their web-only tools whatever the mode.
+    const options = general ? { mode: 'auto', effort, model, fast: true } : { mode, effort, model };
     const args = agent.cli === 'claude'
-      ? claudeArgs(prompt, sessionID, [...(general ? GENERAL_CLAUDE_ARGS : []), ...(agent.args ?? [])])
-      : codexArgs(prompt, sessionID, agent.args, cwd);
-    const parse = agent.cli === 'claude' ? parseClaude : parseCodex;
+      ? claudeArgs(prompt, sessionID, [...(general ? [...GENERAL_CLAUDE_ARGS, '--system-prompt', generalPrompt(language)] : []), ...(agent.args ?? [])], options)
+      : codexArgs(prompt, sessionID, agent.args, cwd, options);
+    const state = {};
+    const parse = agent.cli === 'claude' ? (line) => parseClaude(line, state) : parseCodex;
     const command = agent.command ?? agent.cli;
 
     // detached: own process group, so cancelling also stops the tools the agent started.
@@ -493,6 +591,11 @@ function main() {
     if (message.finished) log(`■ ${message.finished.status}${message.finished.error ? ': ' + message.finished.error : ''}`);
   };
   const session = new AgentSession(workspace, agents, emit, path.join(home, 'general'));
+  const refreshOllama = async () => {
+    const ollama = agents.find((a) => a.cli === 'ollama');
+    if (ollama) session.ollama = await ollamaModels(ollama.host);
+  };
+  refreshOllama();
   const workspaces = workspacesFor(workspace, agents);
   const speech = new SpeechServer();
   speech.start(); // warm up so the first answer isn't delayed by the interpreter starting
@@ -508,11 +611,16 @@ function main() {
     clients.add(socket);
     log(`App connected: ${socket.remoteAddress}`);
     const send = (message) => socket.write(JSON.stringify(message) + '\n');
-    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available, workspaces } });
+    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available, workspaces, models: session.models() } });
+    refreshOllama(); // a newly pulled model shows up on the next connection
     readline.createInterface({ input: socket }).on('line', (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }
-      if (message.run) { log(`▶︎ ${message.run.agent}: ${message.run.text}`); session.run(message.run); }
+      if (message.run) {
+        const { mode, effort } = sanitizeOptions(message.run);
+        log(`▶︎ ${message.run.agent} [${mode}${effort ? ', ' + effort : ''}]: ${message.run.text}`);
+        session.run(message.run);
+      }
       else if (message.cancel) session.cancel();
       else if (message.reset) session.reset();
       else if (message.speak) {

@@ -6,6 +6,8 @@
 #        scripts/bridge-service.sh status | code | logs
 #
 # The service gets the PATH of the shell you install from, so claude / codex / ollama are found.
+# It runs under `caffeinate -i`, so the Mac doesn't idle-sleep while the bridge is up (closing the lid still sleeps).
+# On battery that costs charge; plug in for long sessions.
 # API keys (e.g. OPENROUTER_API_KEY) are not copied: put them in the agent's "env" in ~/.voxcode/agents.json.
 set -eu
 
@@ -29,6 +31,8 @@ install)
     <key>Label</key><string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
         <string>$NODE</string>
         <string>$ROOT/bridge/voxcode-bridge.mjs</string>
         <string>--workspace</string>
@@ -47,6 +51,8 @@ install)
 EOF
     plutil -lint "$PLIST" >/dev/null
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    # bootout returns before the old instance is gone; bootstrapping too early fails with "Input/output error".
+    for _ in 1 2 3 4 5 6 7 8 9 10; do launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break; sleep 0.5; done
     launchctl bootstrap "$DOMAIN" "$PLIST"
     sleep 1
     echo "Bridge service running for $WORKSPACE"

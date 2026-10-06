@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildPrompt, replyLanguageRule, codexArgs, describeWorkspace, generalPrompt, loadAgents, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS, workspacesFor } from './voxcode-bridge.mjs';
+import { buildPrompt, replyLanguageRule, claudeArgs, codexArgs, codexModels, modelsFor, sanitizeOptions, describeWorkspace, generalPrompt, interruptionNote, loadAgents, normalizeCode, parseClaude, parseCodex, RESPONSE_SECTIONS, workspacesFor } from './voxcode-bridge.mjs';
 
 test('claude stream-json parsing', () => {
   assert.deepEqual(parseClaude('{"type":"system","subtype":"init","session_id":"s1"}'), [{ session: { _0: 's1' } }]);
@@ -163,4 +163,58 @@ test('cancelling an ollama chat stops it cleanly', async () => {
     server.close();
     fs.rmSync(dir, { recursive: true });
   }
+});
+
+test('permission modes and effort become CLI flags (and nothing else does)', () => {
+  const has = (args, ...seq) => args.join(' ').includes(seq.join(' '));
+  assert.ok(has(claudeArgs('p', null, [], { mode: 'manual' }), '--permission-mode', 'acceptEdits'));
+  assert.ok(has(claudeArgs('p', null, [], {}), '--permission-mode', 'auto'));
+  const full = claudeArgs('p', null, [], { mode: 'full', effort: 'max' });
+  assert.ok(full.includes('--dangerously-skip-permissions') && !full.includes('--permission-mode'));
+  assert.ok(has(full, '--effort', 'max'));
+  assert.ok(has(codexArgs('p', null, [], '/w', { mode: 'full' }), '-s', 'danger-full-access'));
+  assert.ok(has(codexArgs('p', 't1', [], '/w', { mode: 'full', effort: 'max' }), '-c', 'sandbox_mode="danger-full-access"', '-c', 'model_reasoning_effort="xhigh"'));
+  assert.ok(has(codexArgs('p', null, ['-c', 'model_reasoning_effort="none"'], '/w', { effort: 'high' }),
+    '-c', 'model_reasoning_effort="high"', '-c', 'model_reasoning_effort="none"')); // agent's own setting comes last and wins
+  assert.deepEqual(sanitizeOptions({ mode: 'root; rm -rf /', effort: '"; echo' }), { mode: 'auto', effort: undefined });
+});
+
+test('models offered per agent, and only listed ones are used', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vox-'));
+  fs.writeFileSync(path.join(dir, 'models_cache.json'), JSON.stringify({ models: [
+    { slug: 'b', display_name: 'B', visibility: 'list', priority: 2 },
+    { slug: 'hidden', display_name: 'H', visibility: 'hide', priority: 1 },
+    { slug: 'a', display_name: 'A', visibility: 'list', priority: 1 },
+  ] }));
+  assert.deepEqual(codexModels(dir), [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }]);
+  assert.deepEqual(modelsFor({ cli: 'claude' }).map((m) => m.id), ['fable', 'opus', 'sonnet', 'haiku']);
+  assert.deepEqual(modelsFor({ cli: 'codex', args: ['-m', 'qwen/qwen3-coder'] }), []); // pinned by the agent
+  assert.deepEqual(modelsFor({ cli: 'ollama' }, [{ id: 'qwen3:8b', name: 'qwen3:8b' }]).map((m) => m.id), ['qwen3:8b']);
+  assert.deepEqual(modelsFor({ cli: 'claude', models: ['opus'] }), [{ id: 'opus', name: 'opus' }]);
+  const args = claudeArgs('p', null, ['--model', 'haiku'], { model: 'opus' });
+  assert.ok(args.lastIndexOf('opus') > args.indexOf('haiku'), 'the picked model comes last and wins');
+  assert.ok(codexArgs('p', null, [], '/w', { model: 'a' }).join(' ').includes('-m a'));
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('General answers fast: no thinking or low reasoning, streamed, read-only', () => {
+  const has = (args, ...seq) => args.join('\0').includes(seq.join('\0'));
+  assert.ok(has(claudeArgs('p', null, [], { fast: true }), '--settings', '{"alwaysThinkingEnabled":false}'));
+  assert.ok(!claudeArgs('p', null, [], { fast: true, effort: 'high' }).includes('--settings')); // a chosen effort wins
+  assert.ok(!claudeArgs('p', null, [], {}).includes('--settings'));
+  assert.ok(has(codexArgs('p', null, [], '/w', { fast: true, mode: 'full' }), '-s', 'read-only', '-c', 'model_reasoning_effort="low"'));
+  assert.ok(has(codexArgs('p', 't1', [], '/w', { fast: true, effort: 'high' }), 'sandbox_mode="read-only"', '-c', 'model_reasoning_effort="high"'));
+
+  const state = {};
+  const delta = (text) => JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });
+  parseClaude(JSON.stringify({ type: 'stream_event', event: { type: 'message_start' } }), state);
+  assert.deepEqual(parseClaude(delta('ท้องฟ้า'), state), [{ message: { _0: 'ท้องฟ้า' } }]);
+  assert.deepEqual(parseClaude(delta('สีฟ้า '), state), [{ message: { _0: 'ท้องฟ้าสีฟ้า' } }]);
+  parseClaude(JSON.stringify({ type: 'stream_event', event: { type: 'message_start' } }), state); // next message starts over
+  assert.deepEqual(parseClaude(delta('ค่ะ'), state), [{ message: { _0: 'ค่ะ' } }]);
+
+  assert.equal(interruptionNote(undefined), '');
+  assert.match(interruptionNote(''), /before hearing any/);
+  assert.match(interruptionNote('แสงอาทิตย์มีหลายสี'), /heard only up to: "…แสงอาทิตย์มีหลายสี"/);
+  assert.ok(loadAgents(null).some((a) => a.cli === 'codex' && a.workspace === 'general'));
 });

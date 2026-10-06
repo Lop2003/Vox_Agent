@@ -12,5 +12,6 @@
     ]
   },
   { "name": "Qwen3 8B (local chat)", "cli": "ollama", "model": "qwen3:8b" },
-  { "name": "Claude", "cli": "claude", "workspace": "general" }
+  { "name": "Claude", "cli": "claude", "workspace": "general" },
+  { "name": "GPT", "cli": "codex", "workspace": "general" }
 ]

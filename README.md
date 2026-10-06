@@ -1,6 +1,6 @@
 # Vox Agent
 
-Voice interface for AI coding agents (Claude Code / Codex), on iPhone and Mac.
+Voice interface for AI coding agents (Claude Code / Codex), on iPhone. (A macOS app is kept in the repo too; the iPhone app is the product.)
 
 Mic → Speech-to-Text (Thai / English) → structured prompt → agent CLI in your workspace → response → optional Text-to-Speech.
 
@@ -11,18 +11,48 @@ Mac app    (mic, STT, TTS, UI) ──localhost──▶ bridge it starts itself 
 
 Both apps run agents through the same bridge ([bridge/voxcode-bridge.mjs](bridge/voxcode-bridge.mjs), Node 18+, no dependencies), so there is one implementation of prompts, CLI invocation and output parsing.
 
-## iPhone
+## Setup (free Apple ID, no paid developer account)
 
-1. On the Mac, install the bridge as a login service (starts at login, restarts if it dies):
-   ```sh
-   scripts/bridge-service.sh install ~/path/to/project   # prints the pairing code
-   scripts/bridge-service.sh status | code | logs | uninstall
-   ```
-   Or run it in a terminal: `node bridge/voxcode-bridge.mjs --workspace ~/path/to/project`.
-   The code is saved in `~/.voxcode/pairing-code` (`--new-code` revokes it) and never written to the log.
-2. Open `VoxCodeMobile/VoxCodeMobile.xcodeproj` in Xcode, pick your Team under Signing, and run on your iPhone.
-3. Enter the pairing code. On the same Wi-Fi the bridge is found automatically; otherwise type its address (e.g. a Tailscale IP).
-4. Tap the mic, speak, pause: it sends after 2 s of silence. Or tap 〰️ for a hands-free call.
+**On the Mac (once)**
+1. Install Node.js 18+ and Claude Code (`claude`, logged in) and/or Codex (`codex login`). Xcode gives the bridge the natural Thai voice.
+2. Start the bridge as a login service (starts at login, restarts if it dies, keeps the Mac awake while it runs). Either:
+   - **Mac app** (no Terminal): `./scripts/build-app.sh && open "build/Vox Agent.app"`, choose the **workspace** in the toolbar (or **Pair iPhone** › **Choose Workspace…**). That starts the bridge service for that folder; the Mac app and the iPhone both use it. **Pair iPhone** shows the QR code.
+   - **Terminal**:
+     ```sh
+     scripts/bridge-service.sh install ~/path/to/project   # prints the pairing code
+     scripts/bridge-service.sh status | code | logs | uninstall
+     ```
+   The code is saved in `~/.voxcode/pairing-code` (*New code* / `--new-code` revokes it) and never written to the log.
+
+**On the iPhone (once, with a cable)**
+1. iPhone: Settings › Privacy & Security › **Developer Mode** on (restarts the phone).
+2. Xcode: Settings › Accounts › add your Apple ID. Open `VoxCode.xcworkspace`, target **VoxCodeMobile** › Signing & Capabilities › Team = your Personal Team, Bundle Identifier `com.voxagent.ai` (or any unique one).
+3. Choose the iPhone as the run destination and press ▶︎. First time: iPhone Settings › General › VPN & Device Management › trust your Apple ID.
+4. In the app, allow Microphone, Speech Recognition and Local Network, then pair: **Scan QR code** in the app's Pair screen (or scan with the iPhone Camera and tap *Open in Vox Agent*, or type the code).
+
+**Every 7 days** a free-Apple-ID app expires: press ▶︎ in Xcode again (cable, or Window › Devices and Simulators › *Connect via network* to do it over Wi-Fi). SideStore can refresh it automatically.
+
+**Away from home Wi-Fi:** install Tailscale (free) on the Mac and the iPhone with the same account, and put the Mac's Tailscale address (100.x.x.x) in *Mac address* when pairing. The app looks for the bridge on the local Wi-Fi first and uses that address only when it isn't there, so one setting works everywhere.
+
+**If answers stop:** `claude` may have logged out ("OAuth session expired" in the app): run `claude` in Terminal to log in again. The Mac must be on (closing the lid sleeps it).
+
+## Using it
+
+Tap the mic, speak, pause: it sends when you stop talking. Or tap 〰️ for a hands-free call in the chat: a waveform bar shows listening/working/speaking, with mute, stop and hang-up buttons; say "หยุด" to cut in.
+
+**Permissions** (⋯ › Permissions), for the project workspace:
+
+| Mode | Asks before running | Claude Code | Codex |
+|---|---|---|---|
+| Manual | every request that would change files | edits files, no shell commands (`acceptEdits`) | `workspace-write` sandbox |
+| Auto (default) | spoken change requests only (speech can mishear, e.g. "markdown" → "มาร์คดาว") | its safety classifier (`auto`) | `workspace-write` sandbox |
+| Full access | never — shown in orange under the title | `--dangerously-skip-permissions` | `danger-full-access` |
+
+Answer a confirmation by tapping *Run*, or in a call by saying "ใช่" / "ไม่".
+
+**Effort** (⋯ › Effort): Default, Low, Medium, High, Max — Claude `--effort`, Codex `model_reasoning_effort` (Max = `xhigh`).
+
+**Model** (tap the title): Claude offers Fable / Opus / Sonnet / Haiku; Codex lists the models your account has (from Codex's own model list); Ollama lists the chat models you've pulled. The choice is remembered per agent, shown in the title, and the bridge only accepts models from those lists.
 
 The app reconnects on its own when the bridge restarts or the network drops; only a wrong pairing code needs you.
 
@@ -32,16 +62,18 @@ The link is TLS 1.2 with a pre-shared key derived from the pairing code: encrypt
 
 ### Agents and models
 
-By default the bridge offers Claude Code and Codex. Put a list in `~/.voxcode/agents.json` (or pass `--agents <file>`) to add others; see [bridge/agents.example.json](bridge/agents.example.json):
+By default the bridge offers Claude Code and Codex (pick one from the title). Put a list in `~/.voxcode/agents.json` (or pass `--agents <file>`) to add others; see [bridge/agents.example.json](bridge/agents.example.json):
 - `"cli": "claude"` with extra args, e.g. `["--model", "haiku"]` for a cheaper Claude.
 - `"cli": "codex"` pointed at an OpenAI-compatible provider such as OpenRouter. Use only `-c`/`-m` args so follow-ups (`codex exec resume`) keep working.
 - `"cli": "ollama", "model": "qwen3:8b"` chats with a local model directly (streams, answers in the app's language). It can't read or edit files: small models driven through Codex ignore the reply language and invent results, so this mode tells the user to switch to Claude Code for real code work.
 
-**Workspaces.** The app switches between two workspaces, each with its own agents and chat history: the project folder (the agents above) and **General**, for everyday questions that have nothing to do with the code. Mark an agent `"workspace": "general"` to put it there. If none is marked, the bridge adds a General "Claude" that runs in an empty folder of its own (`general/` in the bridge home, `~/.voxcode` by default) with web search and fetch as its only tools (no MCP servers), so it can't touch your files or run commands.
+**Workspaces.** The app switches between two workspaces, each with its own agents and chat history: the project folder (the agents above) and **General**, for everyday questions that have nothing to do with the code. Mark an agent `"workspace": "general"` to put it there. If none is marked, the bridge adds a General "Claude" that runs in an empty folder of its own (`general/` in the bridge home, `~/.voxcode` by default) with web search and fetch as its only tools (no MCP servers), so it can't touch your files or run commands. Without an agents file there is also a General "GPT" (Codex, read-only sandbox).
+
+General agents are tuned for quick spoken answers: Claude runs without extended thinking, with its own short system prompt instead of Claude Code's, without your Claude Code hooks and plugins, and streams its answer so the app starts speaking after the first sentence; Codex uses low reasoning. Choosing an Effort in the app turns thinking back on. If you cut an answer off by speaking, the next request tells the agent how much you heard, so it carries on instead of starting over.
 
 Answers come back in the app's speech language (Thai by default); the bridge states it at the start and end of every prompt.
 
-## Mac app
+## Mac app (kept for experiments)
 
 ```sh
 ./scripts/build-app.sh   # builds "build/Vox Agent.app" (a bundle is required for mic/speech permissions)

@@ -56,6 +56,21 @@ public final class AppModel {
         set { storedAgent = newValue }
     }
     public var agents: [String] { workspaces.first { $0.id == workspaceID }?.agents ?? [] }
+
+    /// Models the selected agent offers; empty when it only has its default.
+    public var models: [AgentModel] { runner?.models[agent] ?? [] }
+    /// The selected agent's model id, "" for its default. Remembered per agent.
+    public var model: String {
+        get {
+            let id = storedModels[agent] ?? ""
+            return models.contains { $0.id == id } ? id : ""
+        }
+        set { storedModels[agent] = newValue }
+    }
+    public var modelName: String? { models.first { $0.id == model }?.name }
+    private var storedModels = UserDefaults.standard.dictionary(forKey: "models") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(storedModels, forKey: "models") }
+    }
     private var storedAgent = UserDefaults.standard.string(forKey: "agent") ?? "Claude Code" {
         didSet { UserDefaults.standard.set(storedAgent, forKey: "agent") }
     }
@@ -116,11 +131,27 @@ public final class AppModel {
     public private(set) var inputLevel: Double = 0
     /// Muted in a call: the mic stays off (no listening, no interrupting) until unmuted; the call goes on.
     public private(set) var micMuted = false
+    /// Manual: confirm every request that would change files. Auto: confirm spoken ones. Full: never (and the
+    /// agent runs without its sandbox). Confirmation applies to the project workspace only.
+    public var permissionMode = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "permissionMode") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(permissionMode.rawValue, forKey: "permissionMode") }
+    }
+    /// How hard the model thinks; `.standard` keeps each CLI's own default.
+    public var effort = Effort(rawValue: UserDefaults.standard.string(forKey: "effort") ?? "") ?? .standard {
+        didSet { UserDefaults.standard.set(effort.rawValue, forKey: "effort") }
+    }
+    /// A spoken request waiting for the user's go-ahead (see `confirmPending()` / `cancelPending()`).
+    public private(set) var pendingRequest: String?
     /// What we said recently, to recognize it if the mic picks it up.
     private var recentSpeech = ""
     /// The answer is arriving token by token (local models): speak it sentence by sentence as it comes.
     private var streamingAnswer = false
     private var spokenCharacters = 0
+    /// Sentences of the current answer handed to the voice, in order.
+    private var answerSpoken: [String] = []
+    /// The user cut the last answer off: what they heard of it, sent with their next request.
+    private var interruptedAnswer: String?
+    private var ackTask: Task<Void, Never>?
 
     /// Saved chats, newest first (includes the current one once it has a turn).
     public private(set) var conversations: [Conversation]
@@ -162,6 +193,40 @@ public final class AppModel {
         if phase == .idle { Task { await startListening() } }
     }
 
+    /// Runs the request that was waiting for confirmation.
+    public func confirmPending() {
+        guard let request = pendingRequest else { return }
+        pendingRequest = nil
+        // In a call the mic is usually open for the spoken answer: stop listening (dropping any partial words)
+        // so the request can go; send() only runs when idle.
+        stopListeningWithoutSending()
+        transcript = request
+        send(spoken: false, confirmed: true)
+    }
+
+    private func stopListeningWithoutSending() {
+        silenceTask?.cancel()
+        if micOpen {
+            closeMic()
+            stt.cancel()
+        }
+        if phase == .listening || phase == .transcribing { phase = .idle }
+    }
+
+    /// Drops the request that was waiting for confirmation.
+    public func cancelPending() {
+        guard pendingRequest != nil else { return }
+        pendingRequest = nil
+        if inCall { say(localeID.hasPrefix("th") ? "ยกเลิกแล้ว" : "Cancelled") }
+    }
+
+    /// Puts the waiting request back in the text field to fix it by hand.
+    public func editPending() {
+        guard let request = pendingRequest else { return }
+        pendingRequest = nil
+        transcript = request
+    }
+
     /// Mute or unmute the mic during a call, like a phone's mute button. Muting drops what was being said.
     public func toggleMute() {
         micMuted.toggle()
@@ -181,9 +246,16 @@ public final class AppModel {
     }
 
     /// In a call: stop the agent's work or its voice and go back to listening, without hanging up.
-    public func interrupt() {
-        if phase == .running { runner?.cancel() } // finish(turn:) then listens again
-        tts.stop()                                 // speechFinished() then listens again
+    public func interrupt() { cutIn() } // finish(turn:) / speechFinished() then listen again
+
+    /// The user cut in: stop talking (and the agent, if it's still writing), remembering how much of the
+    /// answer they heard so the agent can carry on from there instead of starting over.
+    private func cutIn() {
+        if phase == .running || (!answerSpoken.isEmpty && tts.unfinished > 0) {
+            interruptedAnswer = answerSpoken.dropLast(tts.unfinished).joined(separator: " ")
+        }
+        tts.stop()
+        if phase == .running { runner?.cancel() }
     }
 
     private func speechFinished() {
@@ -229,9 +301,14 @@ public final class AppModel {
         let speakable = SpeechText.speakable(from: response)
         while let (chunk, end) = SpeechChunker.next(in: speakable, after: spokenCharacters, final: final) {
             spokenCharacters = end
-            if !chunk.isEmpty { say(chunk) }
+            if !chunk.isEmpty { sayAnswer(chunk) }
             if final { break }
         }
+    }
+
+    private func sayAnswer(_ text: String) {
+        answerSpoken.append(text)
+        say(text)
     }
 
     private var speaksAnswers: Bool { inCall || autoSpeak }
@@ -244,7 +321,7 @@ public final class AppModel {
     private func cue(for status: AgentStatus) -> String? {
         let thai = localeID.hasPrefix("th")
         switch status {
-        case .analyzing where inGeneralWorkspace: return thai ? "ขอคิดแป๊บนึง" : "Let me think"
+        case _ where inGeneralWorkspace: return nil // a conversation: no "let me think" fillers
         case .analyzing: return thai ? "กำลังดูโค้ด" : "Looking at the code"
         case .editing: return thai ? "กำลังแก้ไฟล์" : "Editing files"
         case .testing: return thai ? "กำลังรันเทส" : "Running checks"
@@ -380,8 +457,7 @@ public final class AppModel {
             // (Not marked as echo: the classifier may just be a moment behind; the next partial decides.)
             if activity != nil, Date().timeIntervalSince(lastSpeechHeard) > 1.0 { return }
             // Real words over our own voice: stop talking (and the agent, if it's still writing) and listen.
-            tts.stop()
-            if phase == .running { runner?.cancel() }
+            cutIn()
             beginTurn()
         }
         guard phase == .listening || phase == .transcribing else { return }
@@ -444,17 +520,37 @@ public final class AppModel {
         if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if inCall { Task { await startListening() } } else { errorMessage = "No speech detected. Try again." }
         } else if sendAfterTranscribing {
-            send()
+            send(spoken: true)
         }
     }
 
     // MARK: Agent
 
-    public func send() {
+    /// Sends what's in the text field. Typed or reviewed text goes straight through.
+    public func send() { send(spoken: false) }
+
+    /// `spoken`: sent automatically after speech-to-text, so it may be misheard and gets confirmed if it would
+    /// change files. A pending confirmation is answered by this text instead ("ใช่" / "ไม่" / a new request).
+    func send(spoken: Bool, confirmed: Bool = false) {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard phase == .idle else { return }
         guard !text.isEmpty else { errorMessage = "Nothing to send: the transcription is empty."; return }
         guard let runner else { errorMessage = runnerMissingMessage; return }
+
+        if pendingRequest != nil {
+            switch SpokenAnswer(text) {
+            case .yes: transcript = ""; return confirmPending()
+            case .no: transcript = ""; return cancelPending()
+            case .other: pendingRequest = nil // a different request replaces it (and may be confirmed in turn)
+            }
+        }
+        let needsConfirmation = permissionMode == .manual || (permissionMode == .auto && spoken)
+        if !confirmed, needsConfirmation, !inGeneralWorkspace, ChangeIntent.mayChangeFiles(text) {
+            pendingRequest = text
+            transcript = ""
+            if inCall { say(localeID.hasPrefix("th") ? "จะให้ \(agent) ทำตามนี้ใช่ไหม" : "Should \(agent) go ahead with that?") }
+            return
+        }
 
         errorMessage = nil
         tts.stop()
@@ -463,18 +559,32 @@ public final class AppModel {
         let turnID = turns[turns.count - 1].id
         streamingAnswer = false
         spokenCharacters = 0
+        answerSpoken = []
+        let interrupted = interruptedAnswer
+        interruptedAnswer = nil
         persist()
         transcript = ""
         phase = .running
-        if inCall, let ack = cue(for: .analyzing) { say(ack) } // acknowledge right away, like a person would
+        if inCall, let ack = cue(for: .analyzing) {
+            // Like a person: only fill a silence. A quick answer needs no "let me think".
+            ackTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, !Task.isCancelled, phase == .running, !isSpeaking else { return }
+                say(ack)
+            }
+        }
 
-        runner.run(text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile, language: localeID,
+        let request = AgentRequest(text: text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile,
+                                   language: localeID, mode: permissionMode, effort: effort,
+                                   model: model.isEmpty ? nil : model, interrupted: interrupted)
+        runner.run(request,
                    onEvent: { [weak self] event in self?.handle(event, turn: turnID) },
                    onFinish: { [weak self] status, error in self?.finish(turn: turnID, status: status, error: error) })
     }
 
     private func handle(_ event: AgentEvent, turn id: UUID) {
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
+        if case .message = event { ackTask?.cancel() }
         switch event {
         case .status(let status):
             if inCall {
@@ -493,6 +603,8 @@ public final class AppModel {
             if !previous.isEmpty, text.count > previous.count, text.hasPrefix(previous) {
                 streamingAnswer = true
                 narration = nil
+            } else if streamingAnswer, !text.hasPrefix(previous) {
+                spokenCharacters = 0 // a new message (e.g. after a web search) streams from its start
             }
             if streamingAnswer { speakStream(text, final: false) } else if inCall { narration = text }
         case .completed(let text) where !text.isEmpty: turns[i].response = text
@@ -501,6 +613,7 @@ public final class AppModel {
     }
 
     private func finish(turn id: UUID, status: AgentStatus, error: String?) {
+        ackTask?.cancel()
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
         turns[i].status = status
         turns[i].error = error
@@ -517,7 +630,7 @@ public final class AppModel {
         }
         if inCall {
             switch status {
-            case .completed: say(SpeechText.speakable(from: turns[i].response))
+            case .completed: sayAnswer(SpeechText.speakable(from: turns[i].response))
             case .failed: say((localeID.hasPrefix("th") ? "ไม่สำเร็จ " : "That failed. ") + (error ?? ""))
             default: break
             }
@@ -552,6 +665,7 @@ public final class AppModel {
 
     public func newConversation() {
         cancel()
+        pendingRequest = nil
         runner?.reset()
         turns = []
         conversationID = UUID()

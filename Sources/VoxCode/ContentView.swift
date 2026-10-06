@@ -7,7 +7,7 @@ struct ContentView: View {
     @State private var model = AppModel()
     @State private var workspace = WorkspaceManager.load()
     @State private var bridge = BridgeClient()
-    @State private var localBridge: LocalBridge?
+    @State private var showPairPhone = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,39 +24,21 @@ struct ContentView: View {
         .frame(minWidth: 680, minHeight: 600)
         .toolbar { toolbar }
         .navigationTitle("Vox Agent")
+        .sheet(isPresented: $showPairPhone) { PairPhoneView(chooseWorkspace: chooseWorkspace) }
         .onAppear {
             model.runnerMissingMessage = "Choose a workspace folder first."
-            if let workspace { startBridge(in: workspace) }
+            model.runner = bridge
+            if BridgeService.isRunning { connectToService() } else { workspace = nil }
         }
     }
 
-    /// Agents run through the same Node bridge the iPhone uses, started here for this workspace (localhost only).
-    private func startBridge(in workspace: URL) {
-        localBridge?.stop()
-        localBridge = nil
-        bridge.disconnect()
-        guard let script = LocalBridge.bundledScript else {
-            model.errorMessage = "The agent bridge is missing from the app. Rebuild it with scripts/build-app.sh."
-            return
-        }
-        let home = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Vox Agent/bridge")
-        // Reuse the agents configured for the iPhone bridge, if any.
-        let agents = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voxcode/agents.json")
-        do {
-            let local = try LocalBridge(script: script, workspace: workspace, home: home,
-                                        agentsFile: FileManager.default.fileExists(atPath: agents.path) ? agents : nil)
-            local.onExit = { [model] status in
-                model.errorMessage = status == 127
-                    ? "Node.js not found. Install it (brew install node), then choose the workspace again."
-                    : "The agent bridge stopped (exit \(status)). Log: \(home.appendingPathComponent("bridge.log").path)"
-            }
-            localBridge = local
-            model.runner = bridge
-            bridge.connect(pairingCode: local.pairingCode, host: "127.0.0.1", port: local.port)
-        } catch {
-            model.errorMessage = "Couldn't start the agent bridge: \(error.localizedDescription)"
-        }
+    /// One bridge per Mac: the login service. The workspace chosen here is the one the iPhone works in too;
+    /// this app talks to the same bridge over localhost.
+    private func connectToService() {
+        guard BridgeService.isRunning, let code = try? BridgeService.pairingCode() else { return }
+        workspace = BridgeService.workspace
+        model.runner = bridge
+        bridge.connect(pairingCode: code, host: "127.0.0.1") // retries until the service is listening
     }
 
     private func chooseWorkspace() {
@@ -64,11 +46,22 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.prompt = "Use as Workspace"
+        panel.message = "Agents on this Mac and on your iPhone will work in this folder."
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let script = LocalBridge.bundledScript else {
+            model.errorMessage = "The agent bridge is missing from the app. Rebuild it with scripts/build-app.sh."
+            return
+        }
         model.newConversation()
-        workspace = url
-        WorkspaceManager.save(url)
-        startBridge(in: url)
+        do {
+            try BridgeService.install(workspace: url, script: script)
+            workspace = url
+            WorkspaceManager.save(url)
+            bridge.disconnect()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { connectToService() }
+        } catch {
+            model.errorMessage = "Couldn't start the bridge: \(error.localizedDescription)"
+        }
     }
 
     // MARK: Toolbar
@@ -96,9 +89,20 @@ struct ContentView: View {
                     ForEach(model.agents, id: \.self) { Text($0).tag($0) }
                 }
                 .pickerStyle(.menu)
+                if !model.models.isEmpty {
+                    Picker("Model", selection: $model.model) {
+                        Text("Default").tag("")
+                        ForEach(model.models) { Text($0.name).tag($0.id) }
+                    }
+                    .pickerStyle(.menu)
+                }
             }
             .fixedSize()
             .disabled(model.phase == .running)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showPairPhone = true } label: { Label("Pair iPhone", systemImage: "iphone") }
+                .help("Run the bridge for your iPhone and show its pairing QR code")
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
@@ -121,6 +125,17 @@ struct ContentView: View {
 
     private var composer: some View {
         VStack(spacing: 10) {
+            if let request = model.pendingRequest {
+                HStack(spacing: 10) {
+                    Label("Run with \(model.agent)? “\(request)”", systemImage: "exclamationmark.bubble")
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Edit", action: model.editPending)
+                    Button("Cancel", action: model.cancelPending)
+                    Button("Run", action: model.confirmPending).keyboardShortcut(.return, modifiers: [])
+                }
+            }
             if let error = model.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
@@ -171,6 +186,15 @@ struct ContentView: View {
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Speak responses", isOn: $model.autoSpeak)
                 Toggle("Interrupt by voice", isOn: $model.bargeInEnabled)
+                Picker("Permissions", selection: $model.permissionMode) {
+                    ForEach(PermissionMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .fixedSize()
+                .help(model.permissionMode.detail)
+                Picker("Effort", selection: $model.effort) {
+                    ForEach(Effort.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .fixedSize()
                 Spacer()
                 TextField("Active file (optional)", text: $model.activeFile)
                     .textFieldStyle(.roundedBorder)
