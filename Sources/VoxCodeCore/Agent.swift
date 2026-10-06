@@ -61,9 +61,11 @@ public struct AgentRequest: Equatable, Sendable {
     public var effort: Effort
     /// `AgentModel.id`, or nil for the agent's default model.
     public var model: String?
+    /// The user cut the previous answer off: how much of it they heard ("" = none of it).
+    public var interrupted: String?
 
     public init(text: String, agent: String, activeFile: String? = nil, language: String? = nil,
-                mode: PermissionMode = .auto, effort: Effort = .standard, model: String? = nil) {
+                mode: PermissionMode = .auto, effort: Effort = .standard, model: String? = nil, interrupted: String? = nil) {
         self.text = text
         self.agent = agent
         self.activeFile = activeFile
@@ -71,6 +73,7 @@ public struct AgentRequest: Equatable, Sendable {
         self.mode = mode
         self.effort = effort
         self.model = model
+        self.interrupted = interrupted
     }
 }
 

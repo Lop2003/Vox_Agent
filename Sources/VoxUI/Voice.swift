@@ -167,6 +167,8 @@ final class TextToSpeechService: NSObject, AVSpeechSynthesizerDelegate, AVAudioP
     @MainActor private var generation = 0 // bumped by stop() so stale fetches are ignored
     // Counted by hand: `isSpeaking` is often still true inside didFinish, so it can't tell us the queue is empty.
     @MainActor private var pending = 0
+    /// Sentences queued or playing, not yet finished.
+    @MainActor var unfinished: Int { pending }
 
     override init() {
         super.init()

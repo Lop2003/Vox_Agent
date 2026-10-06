@@ -254,3 +254,60 @@ struct ConfirmWhileListeningTests {
         #expect(runner.runs == ["สร้างไฟล์ README"])
     }
 }
+
+/// Starts answering and keeps going until cancelled; records every request.
+@MainActor
+final class HangingRunner: AgentRunner {
+    var agents = ["Claude"]
+    var requests: [AgentRequest] = []
+    private var finish: (@MainActor (AgentStatus, String?) -> Void)?
+    func run(_ request: AgentRequest,
+             onEvent: @escaping @MainActor (AgentEvent) -> Void,
+             onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
+        requests.append(request)
+        finish = onFinish
+        onEvent(.message("ท้องฟ้าสีฟ้า"))
+        onEvent(.message("ท้องฟ้าสีฟ้าเพราะแสงกระเจิง. แล้ว"))
+    }
+    func cancel() { finish?(.cancelled, nil); finish = nil }
+    func reset() {}
+}
+
+@MainActor
+struct InterruptionTests {
+    @Test func cuttingInTellsTheAgentWhatWasHeard() {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.tts.volume = 0
+        model.autoSpeak = true
+        defer { model.autoSpeak = false; model.cancel() }
+        let runner = HangingRunner()
+        model.runner = runner
+        model.transcript = "ทำไมท้องฟ้าสีฟ้า"
+        model.send()
+        #expect(model.spokenLog == ["ท้องฟ้าสีฟ้าเพราะแสงกระเจิง."]) // spoken while the agent is still writing
+        model.interrupt()
+        #expect(model.phase == .idle)
+
+        model.transcript = "แล้วสีแดงล่ะ"
+        model.send()
+        // The first sentence was still playing when cut off, so the user heard none of it.
+        #expect(runner.requests.last?.interrupted == "")
+        runner.cancel()
+
+        model.transcript = "ขอบคุณ"
+        model.send()
+        #expect(runner.requests.last?.interrupted == nil) // only the request right after the cut
+    }
+
+    @Test func aRepeatedMessageIsNotSpokenAgain() {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.tts.volume = 0
+        model.autoSpeak = true
+        defer { model.autoSpeak = false; model.cancel() }
+        // Claude streams the text, then sends the whole message once more.
+        model.runner = StreamingRunner(["สวัสดีครับ. ", "วันนี้ให้ช่วยอะไรดี", ""])
+        model.transcript = "hi"
+        model.send()
+        #expect(model.spokenLog == ["สวัสดีครับ.", "วันนี้ให้ช่วยอะไรดี"])
+    }
+}

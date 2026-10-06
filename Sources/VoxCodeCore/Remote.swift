@@ -15,7 +15,7 @@ public enum VoxRemote {
 
 public enum ClientMessage: Codable, Equatable, Sendable {
     /// `language`: reply language; `mode`: `PermissionMode` raw value; `effort`: `Effort` raw value (nil = default).
-    case run(id: UUID, text: String, agent: String, activeFile: String?, language: String?, mode: String?, effort: String?, model: String?)
+    case run(id: UUID, text: String, agent: String, activeFile: String?, language: String?, mode: String?, effort: String?, model: String?, interrupted: String?)
     case cancel
     case reset
     /// Ask the bridge to voice `text` with the Mac's neural voices.
@@ -331,7 +331,7 @@ public final class BridgeClient: AgentRunner {
         connection.sendMessage(ClientMessage.run(id: id, text: request.text, agent: request.agent, activeFile: request.activeFile,
                                                  language: request.language, mode: request.mode.rawValue,
                                                  effort: request.effort == .standard ? nil : request.effort.rawValue,
-                                                 model: request.model))
+                                                 model: request.model, interrupted: request.interrupted))
     }
 
     public func cancel() {

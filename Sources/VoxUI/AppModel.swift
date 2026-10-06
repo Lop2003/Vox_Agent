@@ -147,6 +147,11 @@ public final class AppModel {
     /// The answer is arriving token by token (local models): speak it sentence by sentence as it comes.
     private var streamingAnswer = false
     private var spokenCharacters = 0
+    /// Sentences of the current answer handed to the voice, in order.
+    private var answerSpoken: [String] = []
+    /// The user cut the last answer off: what they heard of it, sent with their next request.
+    private var interruptedAnswer: String?
+    private var ackTask: Task<Void, Never>?
 
     /// Saved chats, newest first (includes the current one once it has a turn).
     public private(set) var conversations: [Conversation]
@@ -241,9 +246,16 @@ public final class AppModel {
     }
 
     /// In a call: stop the agent's work or its voice and go back to listening, without hanging up.
-    public func interrupt() {
-        if phase == .running { runner?.cancel() } // finish(turn:) then listens again
-        tts.stop()                                 // speechFinished() then listens again
+    public func interrupt() { cutIn() } // finish(turn:) / speechFinished() then listen again
+
+    /// The user cut in: stop talking (and the agent, if it's still writing), remembering how much of the
+    /// answer they heard so the agent can carry on from there instead of starting over.
+    private func cutIn() {
+        if phase == .running || (!answerSpoken.isEmpty && tts.unfinished > 0) {
+            interruptedAnswer = answerSpoken.dropLast(tts.unfinished).joined(separator: " ")
+        }
+        tts.stop()
+        if phase == .running { runner?.cancel() }
     }
 
     private func speechFinished() {
@@ -289,9 +301,14 @@ public final class AppModel {
         let speakable = SpeechText.speakable(from: response)
         while let (chunk, end) = SpeechChunker.next(in: speakable, after: spokenCharacters, final: final) {
             spokenCharacters = end
-            if !chunk.isEmpty { say(chunk) }
+            if !chunk.isEmpty { sayAnswer(chunk) }
             if final { break }
         }
+    }
+
+    private func sayAnswer(_ text: String) {
+        answerSpoken.append(text)
+        say(text)
     }
 
     private var speaksAnswers: Bool { inCall || autoSpeak }
@@ -304,7 +321,7 @@ public final class AppModel {
     private func cue(for status: AgentStatus) -> String? {
         let thai = localeID.hasPrefix("th")
         switch status {
-        case .analyzing where inGeneralWorkspace: return thai ? "ขอคิดแป๊บนึง" : "Let me think"
+        case _ where inGeneralWorkspace: return nil // a conversation: no "let me think" fillers
         case .analyzing: return thai ? "กำลังดูโค้ด" : "Looking at the code"
         case .editing: return thai ? "กำลังแก้ไฟล์" : "Editing files"
         case .testing: return thai ? "กำลังรันเทส" : "Running checks"
@@ -440,8 +457,7 @@ public final class AppModel {
             // (Not marked as echo: the classifier may just be a moment behind; the next partial decides.)
             if activity != nil, Date().timeIntervalSince(lastSpeechHeard) > 1.0 { return }
             // Real words over our own voice: stop talking (and the agent, if it's still writing) and listen.
-            tts.stop()
-            if phase == .running { runner?.cancel() }
+            cutIn()
             beginTurn()
         }
         guard phase == .listening || phase == .transcribing else { return }
@@ -543,14 +559,24 @@ public final class AppModel {
         let turnID = turns[turns.count - 1].id
         streamingAnswer = false
         spokenCharacters = 0
+        answerSpoken = []
+        let interrupted = interruptedAnswer
+        interruptedAnswer = nil
         persist()
         transcript = ""
         phase = .running
-        if inCall, let ack = cue(for: .analyzing) { say(ack) } // acknowledge right away, like a person would
+        if inCall, let ack = cue(for: .analyzing) {
+            // Like a person: only fill a silence. A quick answer needs no "let me think".
+            ackTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, !Task.isCancelled, phase == .running, !isSpeaking else { return }
+                say(ack)
+            }
+        }
 
         let request = AgentRequest(text: text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile,
                                    language: localeID, mode: permissionMode, effort: effort,
-                                   model: model.isEmpty ? nil : model)
+                                   model: model.isEmpty ? nil : model, interrupted: interrupted)
         runner.run(request,
                    onEvent: { [weak self] event in self?.handle(event, turn: turnID) },
                    onFinish: { [weak self] status, error in self?.finish(turn: turnID, status: status, error: error) })
@@ -558,6 +584,7 @@ public final class AppModel {
 
     private func handle(_ event: AgentEvent, turn id: UUID) {
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
+        if case .message = event { ackTask?.cancel() }
         switch event {
         case .status(let status):
             if inCall {
@@ -576,6 +603,8 @@ public final class AppModel {
             if !previous.isEmpty, text.count > previous.count, text.hasPrefix(previous) {
                 streamingAnswer = true
                 narration = nil
+            } else if streamingAnswer, !text.hasPrefix(previous) {
+                spokenCharacters = 0 // a new message (e.g. after a web search) streams from its start
             }
             if streamingAnswer { speakStream(text, final: false) } else if inCall { narration = text }
         case .completed(let text) where !text.isEmpty: turns[i].response = text
@@ -584,6 +613,7 @@ public final class AppModel {
     }
 
     private func finish(turn id: UUID, status: AgentStatus, error: String?) {
+        ackTask?.cancel()
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
         turns[i].status = status
         turns[i].error = error
@@ -600,7 +630,7 @@ public final class AppModel {
         }
         if inCall {
             switch status {
-            case .completed: say(SpeechText.speakable(from: turns[i].response))
+            case .completed: sayAnswer(SpeechText.speakable(from: turns[i].response))
             case .failed: say((localeID.hasPrefix("th") ? "ไม่สำเร็จ " : "That failed. ") + (error ?? ""))
             default: break
             }

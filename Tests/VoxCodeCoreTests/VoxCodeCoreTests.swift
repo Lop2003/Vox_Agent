@@ -40,8 +40,8 @@ import Testing
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     func json(_ value: some Encodable) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
 
-    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH", mode: "full", effort: "high", model: "gpt-6-sol"))
-        == #"{"run":{"agent":"Codex","effort":"high","id":"00000000-0000-0000-0000-000000000001","language":"th-TH","mode":"full","model":"gpt-6-sol","text":"hi"}}"#)
+    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH", mode: "full", effort: "high", model: "gpt-6-sol", interrupted: "แสง"))
+        == #"{"run":{"agent":"Codex","effort":"high","id":"00000000-0000-0000-0000-000000000001","interrupted":"แสง","language":"th-TH","mode":"full","model":"gpt-6-sol","text":"hi"}}"#)
     #expect(try json(ClientMessage.cancel) == #"{"cancel":{}}"#)
 
     let decode = { (s: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(s.utf8)) }

@@ -12,13 +12,15 @@
 // "cli": "ollama" chats with a local model directly: no file access, but small models answer properly
 // (through Codex they ignore the reply language and invent results). See agents.example.json.
 // "workspace": "general" puts an agent in the General workspace: everyday questions, not the project.
-// It runs in an empty folder of its own and (for Claude) can only search the web. If agents.json has
-// no general agent, the default one (Claude) is added.
+// It runs in an empty folder of its own, can only search the web, and is tuned to answer fast: no extended
+// thinking (Claude) or low reasoning (Codex) unless the app asks for an effort. If agents.json has no general
+// agent, the default one (Claude) is added.
 //
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
-//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?,"mode"?,"effort"?,"model"?}} | {"cancel":{}} | {"reset":{}}
+//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?,"mode"?,"effort"?,"model"?,"interrupted"?}} | {"cancel":{}} | {"reset":{}}
 //                 mode: "manual" | "auto" | "full" (permissions); effort: "low" | "medium" | "high" | "max"
+//                 interrupted: the user cut the previous answer off; what they heard of it ("" = nothing)
 //                 {"speak":{"id","text"}}
 //   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}],"models":{agent:[{"id","name"}]}}}
 //                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
@@ -42,10 +44,14 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 const TIMEOUT_MS = 15 * 60 * 1000;
 const GENERAL = 'general';
 const GENERAL_AGENT = { name: 'Claude', cli: 'claude', workspace: GENERAL };
-const DEFAULT_AGENTS = [{ name: 'Claude Code', cli: 'claude' }, { name: 'Codex', cli: 'codex' }, GENERAL_AGENT];
+const DEFAULT_AGENTS = [{ name: 'Claude Code', cli: 'claude' }, { name: 'Codex', cli: 'codex' }, GENERAL_AGENT,
+  { name: 'GPT', cli: 'codex', workspace: GENERAL }];
 // The General workspace answers questions; it has no business touching files or running commands,
 // nor using the MCP servers configured for coding (company knowledge bases, docs connectors…).
-export const GENERAL_CLAUDE_ARGS = ['--tools', 'WebSearch,WebFetch', '--strict-mcp-config'];
+// No settings sources either: the user's hooks and plugins are for their coding sessions (and slow startup).
+// Partial messages: the answer streams in as it is written, so the app starts speaking after the first sentence.
+export const GENERAL_CLAUDE_ARGS = ['--tools', 'WebSearch,WebFetch', '--strict-mcp-config', '--setting-sources', '',
+  '--include-partial-messages'];
 
 // MARK: Pairing
 
@@ -145,9 +151,19 @@ Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); 
 
 /// Instructions for the General workspace: an everyday assistant, not a coding agent.
 export function generalPrompt(language) {
-  return `You are Vox Agent, a voice assistant. The user talks to you by voice about anything: everyday questions, ideas, writing, explanations. This is not about a codebase; there are no project files. Use web search when the answer depends on current facts.
+  return `You are Vox Agent, a voice assistant. The user talks to you by voice about anything: everyday questions, ideas, writing, explanations. This is not about a codebase; there are no project files. Use web search only when the answer depends on current facts.
 ${replyLanguageRule(language)}
-Format: start with "## Summary" and a 1–3 sentence answer (it is read aloud); put any details under "## Result".`;
+Everything you write is read aloud, so talk the way a person does in conversation: answer straight away in 1–3 short sentences, no headings, lists, tables or Markdown, and go into detail only when asked.
+The user may cut you off mid-answer; then you are told how much they heard. Respond to what they say now, without repeating what they already heard.`;
+}
+
+/// Added to the prompt after the user cut the previous answer off, so the agent knows what they actually heard.
+export function interruptionNote(heard) {
+  if (typeof heard !== 'string') return '';
+  const tail = heard.trim().slice(-400);
+  return tail
+    ? `\n\n(The user interrupted your previous answer. They heard only up to: "…${tail}")`
+    : '\n\n(The user interrupted before hearing any of your previous answer.)';
 }
 
 /// The workspaces the app can switch between: the project folder and General, each with its own agents.
@@ -219,20 +235,31 @@ export const sanitizeOptions = ({ mode, effort } = {}) => ({
 });
 
 /// manual: edits allowed, shell commands need approval (none headless) · auto: Claude's safety classifier · full: no checks.
+/// `options.fast`: no extended thinking unless an effort was chosen (the General workspace's quick answers).
 export function claudeArgs(prompt, sessionID, extra = [], options = {}) {
   const { mode, effort } = sanitizeOptions(options);
+  const fast = options.fast && !effort ? ['--settings', '{"alwaysThinkingEnabled":false}'] : [];
   const permissions = mode === 'full' ? ['--dangerously-skip-permissions']
     : ['--permission-mode', mode === 'manual' ? 'acceptEdits' : 'auto'];
   // options.model is already checked against the agent's list; last so it wins over the agent's own --model.
   return ['-p', prompt, '--output-format', 'stream-json', '--verbose', ...permissions,
-    ...(effort ? ['--effort', effort] : []), ...(sessionID ? ['--resume', sessionID] : []), ...extra,
+    ...(effort ? ['--effort', effort] : []), ...fast, ...(sessionID ? ['--resume', sessionID] : []), ...extra,
     ...(options.model ? ['--model', options.model] : [])];
 }
 
-export function parseClaude(line) {
+/// `state` (one per run) collects streamed text when Claude runs with --include-partial-messages.
+export function parseClaude(line, state = {}) {
   let o;
   try { o = JSON.parse(line); } catch { return []; }
   switch (o.type) {
+    case 'stream_event': {
+      const e = o.event ?? {};
+      if (e.type === 'message_start') state.text = '';
+      if (e.type !== 'content_block_delta' || e.delta?.type !== 'text_delta') return [];
+      state.text = (state.text ?? '') + (e.delta.text ?? '');
+      const text = state.text.trim();
+      return text ? [ev('message', text)] : [];
+    }
     case 'system':
       return o.subtype === 'init' && o.session_id ? [ev('session', o.session_id)] : [];
     case 'assistant':
@@ -266,10 +293,12 @@ export function parseClaude(line) {
 
 /// `exec resume` has no -s/-C flags, so extra args must be `-c`/`-m` style to work on follow-ups too.
 /// The agent's own args come last so an agent can pin its reasoning (e.g. "none" for a small local model).
+/// `options.fast`: read-only, and low reasoning unless an effort was chosen (the General workspace).
 export function codexArgs(prompt, sessionID, extra = [], workspace, options = {}) {
   const { mode, effort } = sanitizeOptions(options);
-  const sandbox = mode === 'full' ? 'danger-full-access' : 'workspace-write';
-  const reasoning = effort ? ['-c', `model_reasoning_effort="${effort === 'max' ? 'xhigh' : effort}"`] : [];
+  const sandbox = options.fast ? 'read-only' : mode === 'full' ? 'danger-full-access' : 'workspace-write';
+  const level = effort ?? (options.fast ? 'low' : undefined);
+  const reasoning = level ? ['-c', `model_reasoning_effort="${level === 'max' ? 'xhigh' : level}"`] : [];
   const model = options.model ? ['-m', options.model] : [];
   return sessionID
     ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`, ...reasoning, ...model, ...extra, sessionID, prompt]
@@ -316,27 +345,30 @@ export class AgentSession {
     return Object.fromEntries(this.agents.map((a) => [a.name, modelsFor(a, this.ollama)]));
   }
 
-  run({ id, text, agent: name, activeFile, language, mode, effort, model: requestedModel }) {
+  run({ id, text, agent: name, activeFile, language, mode, effort, model: requestedModel, interrupted }) {
     if (this.current) return this.emit({ finished: { id, status: 'Failed', error: 'The agent is already running.' } });
     const agent = this.agents.find((a) => a.name === name);
     if (!agent) return this.emit({ finished: { id, status: 'Failed', error: `Unknown agent: ${name}` } });
     // Only a model from the agent's own list ever reaches a command line.
     const model = modelsFor(agent, this.ollama).some((m) => m.id === requestedModel) ? requestedModel : undefined;
-    if (agent.cli === 'ollama') return this.chat({ id, text, agent: model ? { ...agent, model } : agent, language });
+    const note = interruptionNote(interrupted);
+    if (agent.cli === 'ollama') return this.chat({ id, text: text + note, agent: model ? { ...agent, model } : agent, language });
 
     const sessionID = this.sessions.get(name);
     const general = agent.workspace === GENERAL;
     const cwd = general ? this.generalDir : this.workspace;
     if (general) fs.mkdirSync(cwd, { recursive: true });
-    const prompt = general
-      ? `${generalPrompt(language)}\n\nThe user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}`
-      : buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
+    const said = `The user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}${note}`;
+    // General Claude gets its instructions as the system prompt, replacing Claude Code's long coding one.
+    const prompt = !general ? buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language }) + note
+      : agent.cli === 'claude' ? said : `${generalPrompt(language)}\n\n${said}`;
     // General-workspace agents keep their web-only tools whatever the mode.
-    const options = general ? { mode: 'auto', effort, model } : { mode, effort, model };
+    const options = general ? { mode: 'auto', effort, model, fast: true } : { mode, effort, model };
     const args = agent.cli === 'claude'
-      ? claudeArgs(prompt, sessionID, [...(general ? GENERAL_CLAUDE_ARGS : []), ...(agent.args ?? [])], options)
+      ? claudeArgs(prompt, sessionID, [...(general ? [...GENERAL_CLAUDE_ARGS, '--system-prompt', generalPrompt(language)] : []), ...(agent.args ?? [])], options)
       : codexArgs(prompt, sessionID, agent.args, cwd, options);
-    const parse = agent.cli === 'claude' ? parseClaude : parseCodex;
+    const state = {};
+    const parse = agent.cli === 'claude' ? (line) => parseClaude(line, state) : parseCodex;
     const command = agent.command ?? agent.cli;
 
     // detached: own process group, so cancelling also stops the tools the agent started.
