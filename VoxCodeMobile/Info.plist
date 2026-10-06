@@ -14,6 +14,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Vox Agent uses the camera only to scan the pairing QR code shown by the Mac app.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_voxcode._tcp</string>

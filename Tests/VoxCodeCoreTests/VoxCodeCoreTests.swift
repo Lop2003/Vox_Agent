@@ -40,17 +40,19 @@ import Testing
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     func json(_ value: some Encodable) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
 
-    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH", mode: "full", effort: "high"))
-        == #"{"run":{"agent":"Codex","effort":"high","id":"00000000-0000-0000-0000-000000000001","language":"th-TH","mode":"full","text":"hi"}}"#)
+    #expect(try json(ClientMessage.run(id: id, text: "hi", agent: "Codex", activeFile: nil, language: "th-TH", mode: "full", effort: "high", model: "gpt-6-sol"))
+        == #"{"run":{"agent":"Codex","effort":"high","id":"00000000-0000-0000-0000-000000000001","language":"th-TH","mode":"full","model":"gpt-6-sol","text":"hi"}}"#)
     #expect(try json(ClientMessage.cancel) == #"{"cancel":{}}"#)
 
     let decode = { (s: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(s.utf8)) }
     #expect(try decode(#"{"hello":{"workspace":"app","agents":["A","B"],"speech":true,"workspaces":[{"id":"code","name":"app","agents":["A"]},{"id":"general","name":"General","agents":["B"]}]}}"#)
         == .hello(workspace: "app", agents: ["A", "B"], speech: true, workspaces: [
             AgentWorkspace(id: "code", name: "app", agents: ["A"]), AgentWorkspace(id: "general", name: "General", agents: ["B"]),
-        ]))
+        ], models: nil))
     // Older bridges don't send "speech" or "workspaces".
-    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A"]}}"#) == .hello(workspace: "app", agents: ["A"], speech: nil, workspaces: nil))
+    #expect(try decode(#"{"hello":{"workspace":"app","agents":["A"]}}"#) == .hello(workspace: "app", agents: ["A"], speech: nil, workspaces: nil, models: nil))
+    #expect(try decode(#"{"hello":{"workspace":"app","agents":["Codex"],"models":{"Codex":[{"id":"gpt-6-sol","name":"GPT-6-Sol"}]}}}"#)
+        == .hello(workspace: "app", agents: ["Codex"], speech: nil, workspaces: nil, models: ["Codex": [AgentModel(id: "gpt-6-sol", name: "GPT-6-Sol")]]))
     #expect(try decode(#"{"audio":{"id":"00000000-0000-0000-0000-000000000001","data":"AAEC"}}"#) == .audio(id: id, data: Data([0, 1, 2]), error: nil))
     #expect(try decode(#"{"audio":{"id":"00000000-0000-0000-0000-000000000001","error":"no"}}"#) == .audio(id: id, data: nil, error: "no"))
     #expect(try json(ClientMessage.speak(id: id, text: "hi")) == #"{"speak":{"id":"00000000-0000-0000-0000-000000000001","text":"hi"}}"#)

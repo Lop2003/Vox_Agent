@@ -15,7 +15,7 @@ public enum VoxRemote {
 
 public enum ClientMessage: Codable, Equatable, Sendable {
     /// `language`: reply language; `mode`: `PermissionMode` raw value; `effort`: `Effort` raw value (nil = default).
-    case run(id: UUID, text: String, agent: String, activeFile: String?, language: String?, mode: String?, effort: String?)
+    case run(id: UUID, text: String, agent: String, activeFile: String?, language: String?, mode: String?, effort: String?, model: String?)
     case cancel
     case reset
     /// Ask the bridge to voice `text` with the Mac's neural voices.
@@ -24,7 +24,7 @@ public enum ClientMessage: Codable, Equatable, Sendable {
 
 public enum ServerMessage: Codable, Equatable, Sendable {
     /// `speech` is nil from bridges that predate `speak`; `workspaces` from bridges without a General workspace.
-    case hello(workspace: String, agents: [String], speech: Bool?, workspaces: [AgentWorkspace]?)
+    case hello(workspace: String, agents: [String], speech: Bool?, workspaces: [AgentWorkspace]?, models: [String: [AgentModel]]?)
     /// AAC audio for a `speak` request (base64 in JSON), or why there is none.
     case audio(id: UUID, data: Data?, error: String?)
     case event(id: UUID, event: AgentEvent)
@@ -113,6 +113,7 @@ public final class BridgeClient: AgentRunner {
     public private(set) var macName: String?
     public private(set) var agents: [String] = []
     public private(set) var workspaces: [AgentWorkspace] = []
+    public private(set) var models: [String: [AgentModel]] = [:]
     /// The bridge can voice text with the Mac's (much more natural) neural voices.
     public private(set) var canSpeak = false
     private var speechRequests: [UUID: CheckedContinuation<Data, Error>] = [:]
@@ -279,7 +280,8 @@ public final class BridgeClient: AgentRunner {
 
     private func handle(_ message: ServerMessage) {
         switch message {
-        case .hello(let workspace, let agents, let speech, let workspaces):
+        case .hello(let workspace, let agents, let speech, let workspaces, let models):
+            self.models = models ?? [:]
             attempts = 0
             self.agents = agents
             self.workspaces = workspaces ?? [AgentWorkspace(id: AgentWorkspace.code, name: workspace, agents: agents)]
@@ -328,7 +330,8 @@ public final class BridgeClient: AgentRunner {
         pending = (id, onEvent, onFinish)
         connection.sendMessage(ClientMessage.run(id: id, text: request.text, agent: request.agent, activeFile: request.activeFile,
                                                  language: request.language, mode: request.mode.rawValue,
-                                                 effort: request.effort == .standard ? nil : request.effort.rawValue))
+                                                 effort: request.effort == .standard ? nil : request.effort.rawValue,
+                                                 model: request.model))
     }
 
     public func cancel() {

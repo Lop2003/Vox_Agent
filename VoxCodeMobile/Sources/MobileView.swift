@@ -131,6 +131,16 @@ struct MobileView: View {
                     ForEach(model.agents, id: \.self) { Text($0).tag($0) }
                 }
                 .disabled(model.phase == .running)
+                if !model.models.isEmpty {
+                    Picker(selection: $model.model) {
+                        Text("Default").tag("")
+                        ForEach(model.models) { Text($0.name).tag($0.id) }
+                    } label: {
+                        Label("Model: \(model.modelName ?? "Default")", systemImage: "cpu")
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.phase == .running)
+                }
                 Divider()
                 Button("Pair…", systemImage: "link") { showPairing = true }
             } label: {
@@ -138,7 +148,8 @@ struct MobileView: View {
                 // accent tint on iOS 18 and the title turns blue.
                 VStack(spacing: 2) {
                     HStack(spacing: 4) {
-                        Text(model.agents.isEmpty ? "Vox Agent" : model.agent).lineLimit(1)
+                        Text(model.agents.isEmpty ? "Vox Agent" : [model.agent, model.modelName].compactMap { $0 }.joined(separator: " · "))
+                            .lineLimit(1)
                         Image(systemName: "chevron.down").font(.caption2.weight(.bold)).foregroundStyle(Color.secondary)
                     }
                     .font(.subheadline.weight(.semibold)) // two lines must fit the 44 pt bar with room above and below
@@ -619,11 +630,19 @@ struct PairingView: View {
     let bridge: BridgeClient
     @State private var code = PairingStore.code ?? ""
     @State private var host = PairingStore.host
+    @State private var scanning = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button { scanning = true } label: {
+                        Label("Scan QR code", systemImage: "qrcode.viewfinder").font(.headline)
+                    }
+                } footer: {
+                    Text("In the Vox Agent Mac app choose Pair iPhone, then scan the code it shows.")
+                }
                 Section {
                     TextField("XXXX-XXXX-XXXX", text: $code)
                         .textInputAutocapitalization(.characters)
@@ -648,20 +667,25 @@ struct PairingView: View {
                     Section { Text(message).foregroundStyle(.red).font(.footnote) }
                 }
             }
+            .fullScreenCover(isPresented: $scanning) {
+                PairingScanner { link in pair(code: link.code, host: link.host ?? "", port: link.port) }
+            }
             .navigationTitle("Pair with Mac")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Connect") {
-                        PairingStore.code = code
-                        PairingStore.host = host.trimmingCharacters(in: .whitespaces)
-                        bridge.connect(pairingCode: code, host: PairingStore.host, preferLocalNetwork: true)
-                        dismiss()
-                    }
+                    Button("Connect") { pair(code: code, host: host.trimmingCharacters(in: .whitespaces)) }
                     .disabled(PairingCode.normalize(code).count != 12)
                 }
             }
         }
+    }
+
+    private func pair(code: String, host: String, port: UInt16 = VoxRemote.defaultPort) {
+        PairingStore.code = code
+        PairingStore.host = host
+        bridge.connect(pairingCode: code, host: host, port: port, preferLocalNetwork: true)
+        dismiss()
     }
 }

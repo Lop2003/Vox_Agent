@@ -5,6 +5,8 @@ import VoxCodeCore
 
 /// Sets up the iPhone without Terminal: run the bridge for a folder, then scan the QR code with the iPhone Camera.
 struct PairPhoneView: View {
+    /// The app's own workspace chooser: the iPhone uses the same folder.
+    let chooseWorkspace: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var running = BridgeService.isRunning
     @State private var workspace = BridgeService.workspace
@@ -36,14 +38,14 @@ struct PairPhoneView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.tint)
                     .frame(height: 140)
-                Text("Start the bridge for a project folder. The iPhone app runs its agents there.")
+                Text("Choose the workspace. Agents from this Mac and from your iPhone work in that folder.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 320)
             }
 
             Form {
-                LabeledContent("Project") {
+                LabeledContent("Workspace") {
                     Text(workspace?.lastPathComponent ?? "None").help(workspace?.path ?? "")
                 }
                 LabeledContent("Bridge") {
@@ -72,7 +74,7 @@ struct PairPhoneView: View {
             HStack {
                 if running { Button("Stop Bridge", role: .destructive, action: stop) }
                 Spacer()
-                Button(running ? "Change Folder…" : "Start Bridge…", action: start)
+                Button(running ? "Change Workspace…" : "Choose Workspace…", action: start)
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             .frame(width: 420)
@@ -81,20 +83,9 @@ struct PairPhoneView: View {
     }
 
     private func start() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.prompt = "Use This Folder"
-        panel.message = "Choose the project the iPhone app should work on."
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
-        guard let script = LocalBridge.bundledScript else { return error = "The bridge is missing from the app. Rebuild it with scripts/build-app.sh." }
-        do {
-            try BridgeService.install(workspace: folder, script: script)
-            code = try BridgeService.pairingCode()
-            error = nil
-        } catch {
-            self.error = error.localizedDescription
-        }
+        chooseWorkspace()
+        code = (try? BridgeService.pairingCode()) ?? code
+        error = nil
         refresh()
     }
 

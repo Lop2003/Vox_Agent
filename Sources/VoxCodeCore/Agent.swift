@@ -39,6 +39,17 @@ public enum Effort: String, Codable, CaseIterable, Sendable {
     case standard = "default", low, medium, high, max
 }
 
+/// A model an agent can run with (Claude alias, Codex slug or Ollama model).
+public struct AgentModel: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let name: String
+
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
 /// One request to an agent.
 public struct AgentRequest: Equatable, Sendable {
     public var text: String
@@ -48,15 +59,18 @@ public struct AgentRequest: Equatable, Sendable {
     public var language: String?
     public var mode: PermissionMode
     public var effort: Effort
+    /// `AgentModel.id`, or nil for the agent's default model.
+    public var model: String?
 
     public init(text: String, agent: String, activeFile: String? = nil, language: String? = nil,
-                mode: PermissionMode = .auto, effort: Effort = .standard) {
+                mode: PermissionMode = .auto, effort: Effort = .standard, model: String? = nil) {
         self.text = text
         self.agent = agent
         self.activeFile = activeFile
         self.language = language
         self.mode = mode
         self.effort = effort
+        self.model = model
     }
 }
 
@@ -83,6 +97,8 @@ public protocol AgentRunner: AnyObject {
     var agents: [String] { get }
     /// The workspaces the user can switch between, each with its own agents.
     var workspaces: [AgentWorkspace] { get }
+    /// Models each agent can use, by agent name (empty: only its default).
+    var models: [String: [AgentModel]] { get }
     func run(_ request: AgentRequest,
              onEvent: @escaping @MainActor (AgentEvent) -> Void,
              onFinish: @escaping @MainActor (AgentStatus, String?) -> Void)
@@ -94,4 +110,5 @@ public protocol AgentRunner: AnyObject {
 public extension AgentRunner {
     /// Runners that don't know about workspaces: everything is the project workspace.
     var workspaces: [AgentWorkspace] { [AgentWorkspace(id: AgentWorkspace.code, name: "Workspace", agents: agents)] }
+    var models: [String: [AgentModel]] { [:] }
 }

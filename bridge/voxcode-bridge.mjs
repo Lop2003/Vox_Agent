@@ -17,10 +17,10 @@
 //
 // Wire format: newline-delimited JSON over TLS 1.2 with a pre-shared key derived from the pairing code.
 // It is Swift's synthesized Codable form and must match Sources/VoxCodeCore/Remote.swift:
-//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?,"mode"?,"effort"?}} | {"cancel":{}} | {"reset":{}}
+//   app → bridge  {"run":{"id","text","agent","activeFile"?,"language"?,"mode"?,"effort"?,"model"?}} | {"cancel":{}} | {"reset":{}}
 //                 mode: "manual" | "auto" | "full" (permissions); effort: "low" | "medium" | "high" | "max"
 //                 {"speak":{"id","text"}}
-//   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}]}}
+//   bridge → app  {"hello":{"workspace","agents","speech","workspaces":[{"id","name","agents"}],"models":{agent:[{"id","name"}]}}}
 //                 {"audio":{"id","data"?,"error"?}}   (data: base64 AAC; macOS only, see tts-server.swift)
 //                 {"event":{"id","event":{"status"|"activity"|"message"|"completed":{"_0":…}}}}
 //                 {"finished":{"id","status","error"?}}
@@ -159,6 +159,43 @@ export function workspacesFor(workspace, agents) {
   ];
 }
 
+// MARK: Models
+
+const CLAUDE_MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']]
+  .map(([id, name]) => ({ id, name }));
+
+/// Models Codex offers in its own picker (its cache of the account's models), best first.
+export function codexModels(home = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')) {
+  try {
+    const { models } = JSON.parse(fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8'));
+    return models.filter((m) => m.visibility === 'list').sort((a, b) => a.priority - b.priority)
+      .map((m) => ({ id: m.slug, name: m.display_name ?? m.slug }));
+  } catch {
+    return [];
+  }
+}
+
+/// Chat models installed in Ollama (embedding models can't chat).
+export async function ollamaModels(host = 'http://localhost:11434') {
+  try {
+    const response = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(1500) });
+    const { models } = await response.json();
+    return models.map((m) => m.name).filter((n) => !n.includes('embed')).map((n) => ({ id: n, name: n }));
+  } catch {
+    return [];
+  }
+}
+
+/// The models the app may pick for each agent. Empty when the agent's args pin one (e.g. a provider + `-m`).
+export function modelsFor(agent, ollama = []) {
+  if (Array.isArray(agent.models)) return agent.models.map((m) => (typeof m === 'string' ? { id: m, name: m } : m));
+  if ((agent.args ?? []).some((a) => a === '-m' || a === '--model')) return [];
+  if (agent.cli === 'claude') return CLAUDE_MODELS;
+  if (agent.cli === 'codex') return codexModels();
+  if (agent.cli === 'ollama') return ollama;
+  return [];
+}
+
 // MARK: Agent CLIs
 
 const ev = (kind, value) => ({ [kind]: { _0: value } });
@@ -186,8 +223,10 @@ export function claudeArgs(prompt, sessionID, extra = [], options = {}) {
   const { mode, effort } = sanitizeOptions(options);
   const permissions = mode === 'full' ? ['--dangerously-skip-permissions']
     : ['--permission-mode', mode === 'manual' ? 'acceptEdits' : 'auto'];
+  // options.model is already checked against the agent's list; last so it wins over the agent's own --model.
   return ['-p', prompt, '--output-format', 'stream-json', '--verbose', ...permissions,
-    ...(effort ? ['--effort', effort] : []), ...(sessionID ? ['--resume', sessionID] : []), ...extra];
+    ...(effort ? ['--effort', effort] : []), ...(sessionID ? ['--resume', sessionID] : []), ...extra,
+    ...(options.model ? ['--model', options.model] : [])];
 }
 
 export function parseClaude(line) {
@@ -231,9 +270,10 @@ export function codexArgs(prompt, sessionID, extra = [], workspace, options = {}
   const { mode, effort } = sanitizeOptions(options);
   const sandbox = mode === 'full' ? 'danger-full-access' : 'workspace-write';
   const reasoning = effort ? ['-c', `model_reasoning_effort="${effort === 'max' ? 'xhigh' : effort}"`] : [];
+  const model = options.model ? ['-m', options.model] : [];
   return sessionID
-    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`, ...reasoning, ...extra, sessionID, prompt]
-    : ['exec', '--json', '--skip-git-repo-check', '-s', sandbox, ...reasoning, ...extra, '-C', workspace, prompt];
+    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`, ...reasoning, ...model, ...extra, sessionID, prompt]
+    : ['exec', '--json', '--skip-git-repo-check', '-s', sandbox, ...reasoning, ...model, ...extra, '-C', workspace, prompt];
 }
 
 export function parseCodex(line) {
@@ -268,14 +308,21 @@ export function parseCodex(line) {
 export class AgentSession {
   /// `generalDir`: the empty folder General-workspace agents run in.
   constructor(workspace, agents, emit, generalDir = path.join(os.tmpdir(), 'voxagent-general')) {
-    Object.assign(this, { workspace, agents, emit, generalDir, sessions: new Map(), chats: new Map(), current: null });
+    Object.assign(this, { workspace, agents, emit, generalDir, sessions: new Map(), chats: new Map(), current: null, ollama: [] });
   }
 
-  run({ id, text, agent: name, activeFile, language, mode, effort }) {
+  /// The models offered for every agent (sent to the app in hello).
+  models() {
+    return Object.fromEntries(this.agents.map((a) => [a.name, modelsFor(a, this.ollama)]));
+  }
+
+  run({ id, text, agent: name, activeFile, language, mode, effort, model: requestedModel }) {
     if (this.current) return this.emit({ finished: { id, status: 'Failed', error: 'The agent is already running.' } });
     const agent = this.agents.find((a) => a.name === name);
     if (!agent) return this.emit({ finished: { id, status: 'Failed', error: `Unknown agent: ${name}` } });
-    if (agent.cli === 'ollama') return this.chat({ id, text, agent, language });
+    // Only a model from the agent's own list ever reaches a command line.
+    const model = modelsFor(agent, this.ollama).some((m) => m.id === requestedModel) ? requestedModel : undefined;
+    if (agent.cli === 'ollama') return this.chat({ id, text, agent: model ? { ...agent, model } : agent, language });
 
     const sessionID = this.sessions.get(name);
     const general = agent.workspace === GENERAL;
@@ -285,7 +332,7 @@ export class AgentSession {
       ? `${generalPrompt(language)}\n\nThe user said (speech-to-text, may contain recognition errors):\n> ${text.replaceAll('\n', '\n> ')}`
       : buildPrompt({ text, workspace: this.workspace, activeFile, agent: name, isFollowUp: !!sessionID, language });
     // General-workspace agents keep their web-only tools whatever the mode.
-    const options = general ? { mode: 'auto', effort } : { mode, effort };
+    const options = general ? { mode: 'auto', effort, model } : { mode, effort, model };
     const args = agent.cli === 'claude'
       ? claudeArgs(prompt, sessionID, [...(general ? GENERAL_CLAUDE_ARGS : []), ...(agent.args ?? [])], options)
       : codexArgs(prompt, sessionID, agent.args, cwd, options);
@@ -512,6 +559,11 @@ function main() {
     if (message.finished) log(`■ ${message.finished.status}${message.finished.error ? ': ' + message.finished.error : ''}`);
   };
   const session = new AgentSession(workspace, agents, emit, path.join(home, 'general'));
+  const refreshOllama = async () => {
+    const ollama = agents.find((a) => a.cli === 'ollama');
+    if (ollama) session.ollama = await ollamaModels(ollama.host);
+  };
+  refreshOllama();
   const workspaces = workspacesFor(workspace, agents);
   const speech = new SpeechServer();
   speech.start(); // warm up so the first answer isn't delayed by the interpreter starting
@@ -527,7 +579,8 @@ function main() {
     clients.add(socket);
     log(`App connected: ${socket.remoteAddress}`);
     const send = (message) => socket.write(JSON.stringify(message) + '\n');
-    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available, workspaces } });
+    send({ hello: { workspace: path.basename(workspace), agents: agents.map((a) => a.name), speech: speech.available, workspaces, models: session.models() } });
+    refreshOllama(); // a newly pulled model shows up on the next connection
     readline.createInterface({ input: socket }).on('line', (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }

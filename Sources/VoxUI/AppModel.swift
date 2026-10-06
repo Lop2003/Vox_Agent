@@ -56,6 +56,21 @@ public final class AppModel {
         set { storedAgent = newValue }
     }
     public var agents: [String] { workspaces.first { $0.id == workspaceID }?.agents ?? [] }
+
+    /// Models the selected agent offers; empty when it only has its default.
+    public var models: [AgentModel] { runner?.models[agent] ?? [] }
+    /// The selected agent's model id, "" for its default. Remembered per agent.
+    public var model: String {
+        get {
+            let id = storedModels[agent] ?? ""
+            return models.contains { $0.id == id } ? id : ""
+        }
+        set { storedModels[agent] = newValue }
+    }
+    public var modelName: String? { models.first { $0.id == model }?.name }
+    private var storedModels = UserDefaults.standard.dictionary(forKey: "models") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(storedModels, forKey: "models") }
+    }
     private var storedAgent = UserDefaults.standard.string(forKey: "agent") ?? "Claude Code" {
         didSet { UserDefaults.standard.set(storedAgent, forKey: "agent") }
     }
@@ -534,7 +549,8 @@ public final class AppModel {
         if inCall, let ack = cue(for: .analyzing) { say(ack) } // acknowledge right away, like a person would
 
         let request = AgentRequest(text: text, agent: kind, activeFile: activeFile.isEmpty ? nil : activeFile,
-                                   language: localeID, mode: permissionMode, effort: effort)
+                                   language: localeID, mode: permissionMode, effort: effort,
+                                   model: model.isEmpty ? nil : model)
         runner.run(request,
                    onEvent: { [weak self] event in self?.handle(event, turn: turnID) },
                    onFinish: { [weak self] status, error in self?.finish(turn: turnID, status: status, error: error) })

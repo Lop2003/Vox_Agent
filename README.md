@@ -16,7 +16,7 @@ Both apps run agents through the same bridge ([bridge/voxcode-bridge.mjs](bridge
 **On the Mac (once)**
 1. Install Node.js 18+ and Claude Code (`claude`, logged in) and/or Codex (`codex login`). Xcode gives the bridge the natural Thai voice.
 2. Start the bridge as a login service (starts at login, restarts if it dies, keeps the Mac awake while it runs). Either:
-   - **Mac app** (no Terminal): `./scripts/build-app.sh && open "build/Vox Agent.app"`, toolbar **Pair iPhone** › **Start Bridge…** › pick the project folder. It shows a QR code to scan with the iPhone Camera.
+   - **Mac app** (no Terminal): `./scripts/build-app.sh && open "build/Vox Agent.app"`, choose the **workspace** in the toolbar (or **Pair iPhone** › **Choose Workspace…**). That starts the bridge service for that folder; the Mac app and the iPhone both use it. **Pair iPhone** shows the QR code.
    - **Terminal**:
      ```sh
      scripts/bridge-service.sh install ~/path/to/project   # prints the pairing code
@@ -28,7 +28,7 @@ Both apps run agents through the same bridge ([bridge/voxcode-bridge.mjs](bridge
 1. iPhone: Settings › Privacy & Security › **Developer Mode** on (restarts the phone).
 2. Xcode: Settings › Accounts › add your Apple ID. Open `VoxCode.xcworkspace`, target **VoxCodeMobile** › Signing & Capabilities › Team = your Personal Team, Bundle Identifier `com.voxagent.ai` (or any unique one).
 3. Choose the iPhone as the run destination and press ▶︎. First time: iPhone Settings › General › VPN & Device Management › trust your Apple ID.
-4. In the app, allow Microphone, Speech Recognition and Local Network, then pair: scan the Mac app's QR code with the iPhone **Camera** and tap *Open in Vox Agent* (or type the code).
+4. In the app, allow Microphone, Speech Recognition and Local Network, then pair: **Scan QR code** in the app's Pair screen (or scan with the iPhone Camera and tap *Open in Vox Agent*, or type the code).
 
 **Every 7 days** a free-Apple-ID app expires: press ▶︎ in Xcode again (cable, or Window › Devices and Simulators › *Connect via network* to do it over Wi-Fi). SideStore can refresh it automatically.
 
@@ -51,6 +51,8 @@ Tap the mic, speak, pause: it sends when you stop talking. Or tap 〰️ for a h
 Answer a confirmation by tapping *Run*, or in a call by saying "ใช่" / "ไม่".
 
 **Effort** (⋯ › Effort): Default, Low, Medium, High, Max — Claude `--effort`, Codex `model_reasoning_effort` (Max = `xhigh`).
+
+**Model** (tap the title): Claude offers Fable / Opus / Sonnet / Haiku; Codex lists the models your account has (from Codex's own model list); Ollama lists the chat models you've pulled. The choice is remembered per agent, shown in the title, and the bridge only accepts models from those lists.
 
 The app reconnects on its own when the bridge restarts or the network drops; only a wrong pairing code needs you.
 
