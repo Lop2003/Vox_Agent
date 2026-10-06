@@ -103,7 +103,7 @@ struct MobileView: View {
     private func reconnect() {
         guard let code = PairingStore.code else { return }
         switch bridge.state {
-        case .disconnected, .failed, .waiting: bridge.connect(pairingCode: code, host: PairingStore.host)
+        case .disconnected, .failed, .waiting: bridge.connect(pairingCode: code, host: PairingStore.host, preferLocalNetwork: true)
         case .searching, .connecting, .connected: break
         }
     }
@@ -169,6 +169,7 @@ struct MobileView: View {
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Read answers aloud", isOn: $model.autoSpeak)
                 Toggle("Interrupt by voice (calls)", isOn: $model.bargeInEnabled)
+                Toggle("Confirm before changes", isOn: $model.confirmChanges)
                 Divider()
                 Button("Pair…", systemImage: "link") { showPairing = true }
             } label: {
@@ -230,6 +231,10 @@ struct Composer: View {
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
+            if let request = model.pendingRequest {
+                confirmCard(request).transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if model.inCall {
                 callBar
             } else {
@@ -248,6 +253,7 @@ struct Composer: View {
         }
         .animation(.snappy, value: model.phase)
         .animation(.snappy, value: model.inCall)
+        .animation(.snappy, value: model.pendingRequest)
         .animation(.snappy, value: hasText)
         .animation(.snappy, value: model.errorMessage)
     }
@@ -286,6 +292,41 @@ struct Composer: View {
             .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(.primary.opacity(0.08)))
             .shadow(color: .black.opacity(0.08), radius: 16, y: 6)
             .transition(.opacity)
+    }
+
+    // MARK: Confirmation
+
+    /// A spoken request that would change files, shown back before the agent runs it (speech can mishear).
+    private func confirmCard(_ request: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(thai ? "จะให้ \(model.agent) ทำตามนี้ใช่ไหม" : "Run this with \(model.agent)?", systemImage: "exclamationmark.bubble")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.orange)
+            Text("“\(request)”")
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 8) {
+                pillButton(thai ? "แก้ไข" : "Edit", systemImage: "pencil", action: model.editPending)
+                    .disabled(model.inCall)
+                pillButton(thai ? "ยกเลิก" : "Cancel", systemImage: "xmark", action: model.cancelPending)
+                Spacer(minLength: 4)
+                Button(action: model.confirmPending) {
+                    Label(thai ? "ส่งเลย" : "Run", systemImage: "arrow.up")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 40)
+                        .background(Color.accentColor, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            if model.inCall {
+                Text(thai ? "หรือพูดว่า “ใช่” / “ไม่”" : "Or say “yes” / “no”").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.orange.opacity(0.35)))
     }
 
     // MARK: Call bar
@@ -591,7 +632,7 @@ struct PairingView: View {
                     Button("Connect") {
                         PairingStore.code = code
                         PairingStore.host = host.trimmingCharacters(in: .whitespaces)
-                        bridge.connect(pairingCode: code, host: PairingStore.host)
+                        bridge.connect(pairingCode: code, host: PairingStore.host, preferLocalNetwork: true)
                         dismiss()
                     }
                     .disabled(PairingCode.normalize(code).count != 12)

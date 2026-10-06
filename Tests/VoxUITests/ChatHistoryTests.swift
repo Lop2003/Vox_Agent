@@ -168,3 +168,68 @@ struct MuteTests {
         #expect(!model.micMuted)
     }
 }
+
+/// Counts how many requests actually reached the agent.
+@MainActor
+private final class CountingRunner: AgentRunner {
+    var agents = ["Claude Code"]
+    var runs: [String] = []
+    func run(_ text: String, agent: String, activeFile: String?, language: String?,
+             onEvent: @escaping @MainActor (AgentEvent) -> Void,
+             onFinish: @escaping @MainActor (AgentStatus, String?) -> Void) {
+        runs.append(text)
+        onFinish(.completed, nil)
+    }
+    func cancel() {}
+    func reset() {}
+}
+
+@MainActor
+struct ConfirmChangesTests {
+    private func model() -> (AppModel, CountingRunner) {
+        let model = AppModel(store: ChatStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("vox-\(UUID()).json")))
+        model.tts.volume = 0
+        model.confirmChanges = true
+        let runner = CountingRunner()
+        model.runner = runner
+        return (model, runner)
+    }
+
+    @Test func spokenChangeWaitsForYes() {
+        let (model, runner) = model()
+        model.transcript = "สร้างไฟล์ markdown สรุปโปรเจกต์"
+        model.send(spoken: true)
+        #expect(runner.runs.isEmpty)
+        #expect(model.pendingRequest == "สร้างไฟล์ markdown สรุปโปรเจกต์")
+
+        model.transcript = "ใช่"          // the spoken answer
+        model.send(spoken: true)
+        #expect(runner.runs == ["สร้างไฟล์ markdown สรุปโปรเจกต์"])
+        #expect(model.pendingRequest == nil)
+    }
+
+    @Test func noCancelsAndANewRequestReplaces() {
+        let (model, runner) = model()
+        model.transcript = "ลบไฟล์ test ทั้งหมด"
+        model.send(spoken: true)
+        model.transcript = "ไม่"
+        model.send(spoken: true)
+        #expect(runner.runs.isEmpty)
+        #expect(model.pendingRequest == nil)
+
+        model.transcript = "แก้ไฟล์ README"
+        model.send(spoken: true)
+        model.transcript = "อธิบายโปรเจกต์ให้ฟังแทน" // not yes/no: a new request, which needs no confirmation
+        model.send(spoken: true)
+        #expect(runner.runs == ["อธิบายโปรเจกต์ให้ฟังแทน"])
+    }
+
+    @Test func typedOrHarmlessRequestsGoStraightThrough() {
+        let (model, runner) = model()
+        model.transcript = "แก้ไฟล์ README"
+        model.send()                         // typed/reviewed: the user already saw the text
+        model.transcript = "โปรเจกต์นี้ทำอะไรได้บ้าง"
+        model.send(spoken: true)             // spoken but read-only
+        #expect(runner.runs == ["แก้ไฟล์ README", "โปรเจกต์นี้ทำอะไรได้บ้าง"])
+    }
+}

@@ -256,3 +256,17 @@ func bridgeRealAgent() async throws {
     #expect(result == .completed)
     #expect(messages.contains { $0.lowercased().contains("pong") })
 }
+
+/// Local-first with a saved address (the app's setting for Tailscale): whether Bonjour finds nothing or finds some
+/// other bridge (wrong key), the client ends up on the saved address.
+@MainActor @Test(.enabled(if: nodeAvailable))
+func fallsBackToTheSavedAddress() async throws {
+    let box = try Sandbox()
+    let bridge = try box.bridge() // --managed: not advertised, reachable only at its address
+    defer { bridge.stop() }
+    let client = BridgeClient()
+    client.connect(pairingCode: bridge.pairingCode, host: "127.0.0.1", port: bridge.port, preferLocalNetwork: true)
+    await waitFor(seconds: 10) { client.isConnected }
+    #expect(client.state == .connected(workspace: "ws"))
+    client.disconnect()
+}

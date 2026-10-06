@@ -116,6 +116,12 @@ public final class AppModel {
     public private(set) var inputLevel: Double = 0
     /// Muted in a call: the mic stays off (no listening, no interrupting) until unmuted; the call goes on.
     public private(set) var micMuted = false
+    /// Ask before running spoken requests that look like they change files (project workspace only).
+    public var confirmChanges = UserDefaults.standard.object(forKey: "confirmChanges") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(confirmChanges, forKey: "confirmChanges") }
+    }
+    /// A spoken request waiting for the user's go-ahead (see `confirmPending()` / `cancelPending()`).
+    public private(set) var pendingRequest: String?
     /// What we said recently, to recognize it if the mic picks it up.
     private var recentSpeech = ""
     /// The answer is arriving token by token (local models): speak it sentence by sentence as it comes.
@@ -160,6 +166,28 @@ public final class AppModel {
         recognitionFailures = 0
         errorMessage = nil
         if phase == .idle { Task { await startListening() } }
+    }
+
+    /// Runs the request that was waiting for confirmation.
+    public func confirmPending() {
+        guard let request = pendingRequest else { return }
+        pendingRequest = nil
+        transcript = request
+        send(spoken: false)
+    }
+
+    /// Drops the request that was waiting for confirmation.
+    public func cancelPending() {
+        guard pendingRequest != nil else { return }
+        pendingRequest = nil
+        if inCall { say(localeID.hasPrefix("th") ? "ยกเลิกแล้ว" : "Cancelled") }
+    }
+
+    /// Puts the waiting request back in the text field to fix it by hand.
+    public func editPending() {
+        guard let request = pendingRequest else { return }
+        pendingRequest = nil
+        transcript = request
     }
 
     /// Mute or unmute the mic during a call, like a phone's mute button. Muting drops what was being said.
@@ -444,17 +472,36 @@ public final class AppModel {
         if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if inCall { Task { await startListening() } } else { errorMessage = "No speech detected. Try again." }
         } else if sendAfterTranscribing {
-            send()
+            send(spoken: true)
         }
     }
 
     // MARK: Agent
 
-    public func send() {
+    /// Sends what's in the text field. Typed or reviewed text goes straight through.
+    public func send() { send(spoken: false) }
+
+    /// `spoken`: sent automatically after speech-to-text, so it may be misheard and gets confirmed if it would
+    /// change files. A pending confirmation is answered by this text instead ("ใช่" / "ไม่" / a new request).
+    func send(spoken: Bool) {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard phase == .idle else { return }
         guard !text.isEmpty else { errorMessage = "Nothing to send: the transcription is empty."; return }
         guard let runner else { errorMessage = runnerMissingMessage; return }
+
+        if pendingRequest != nil {
+            switch SpokenAnswer(text) {
+            case .yes: transcript = ""; return confirmPending()
+            case .no: transcript = ""; return cancelPending()
+            case .other: pendingRequest = nil // a different request replaces it (and may be confirmed in turn)
+            }
+        }
+        if spoken, confirmChanges, !inGeneralWorkspace, ChangeIntent.mayChangeFiles(text) {
+            pendingRequest = text
+            transcript = ""
+            if inCall { say(localeID.hasPrefix("th") ? "จะให้ \(agent) ทำตามนี้ใช่ไหม" : "Should \(agent) go ahead with that?") }
+            return
+        }
 
         errorMessage = nil
         tts.stop()
@@ -552,6 +599,7 @@ public final class AppModel {
 
     public func newConversation() {
         cancel()
+        pendingRequest = nil
         runner?.reset()
         turns = []
         conversationID = UUID()

@@ -121,6 +121,17 @@ struct ContentView: View {
 
     private var composer: some View {
         VStack(spacing: 10) {
+            if let request = model.pendingRequest {
+                HStack(spacing: 10) {
+                    Label("Run with \(model.agent)? “\(request)”", systemImage: "exclamationmark.bubble")
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Edit", action: model.editPending)
+                    Button("Cancel", action: model.cancelPending)
+                    Button("Run", action: model.confirmPending).keyboardShortcut(.return, modifiers: [])
+                }
+            }
             if let error = model.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
@@ -171,6 +182,7 @@ struct ContentView: View {
                 Toggle("Auto-send after speaking", isOn: $model.autoSend)
                 Toggle("Speak responses", isOn: $model.autoSpeak)
                 Toggle("Interrupt by voice", isOn: $model.bargeInEnabled)
+                Toggle("Confirm before changes", isOn: $model.confirmChanges)
                 Spacer()
                 TextField("Active file (optional)", text: $model.activeFile)
                     .textFieldStyle(.roundedBorder)

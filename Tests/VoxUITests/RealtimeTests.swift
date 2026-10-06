@@ -152,3 +152,24 @@ struct ConfidenceTurnTests {
         #expect(vad.feed(confidence: 0.1, at: at(1.8)) == .endOfTurn)    // 1.3 s since the last speech
     }
 }
+
+struct ConfirmationWordsTests {
+    @Test func spotsRequestsThatChangeFiles() {
+        #expect(ChangeIntent.mayChangeFiles("สร้างไฟล์ markdown สรุปโปรเจกต์"))
+        #expect(ChangeIntent.mayChangeFiles("ช่วยแก้ login rate limit ให้หน่อย"))
+        #expect(ChangeIntent.mayChangeFiles("please fix the failing test"))
+        #expect(!ChangeIntent.mayChangeFiles("โปรเจกต์นี้ทำอะไรได้บ้าง"))
+        #expect(!ChangeIntent.mayChangeFiles("อธิบาย login flow ให้ฟังหน่อย"))
+    }
+
+    @Test func readsShortYesNoAnswers() {
+        #expect(SpokenAnswer("ใช่") == .yes)
+        #expect(SpokenAnswer("ได้เลย") == .yes)
+        #expect(SpokenAnswer("โอเค") == .yes)
+        #expect(SpokenAnswer("ไม่ใช่") == .no)     // contains "ใช่", still a no
+        #expect(SpokenAnswer("ไม่ได้") == .no)     // contains "ได้", still a no
+        #expect(SpokenAnswer("ยกเลิก") == .no)
+        #expect(SpokenAnswer("ได้ แต่ช่วยแก้ไฟล์ README แทนนะ") == .other) // a new instruction, not a plain yes
+        #expect(SpokenAnswer("สรุปโปรเจกต์") == .other)
+    }
+}

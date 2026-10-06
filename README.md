@@ -1,6 +1,6 @@
 # Vox Agent
 
-Voice interface for AI coding agents (Claude Code / Codex), on iPhone and Mac.
+Voice interface for AI coding agents (Claude Code / Codex), on iPhone. (A macOS app is kept in the repo too; the iPhone app is the product.)
 
 Mic → Speech-to-Text (Thai / English) → structured prompt → agent CLI in your workspace → response → optional Text-to-Speech.
 
@@ -11,18 +11,34 @@ Mac app    (mic, STT, TTS, UI) ──localhost──▶ bridge it starts itself 
 
 Both apps run agents through the same bridge ([bridge/voxcode-bridge.mjs](bridge/voxcode-bridge.mjs), Node 18+, no dependencies), so there is one implementation of prompts, CLI invocation and output parsing.
 
-## iPhone
+## Setup (free Apple ID, no paid developer account)
 
-1. On the Mac, install the bridge as a login service (starts at login, restarts if it dies):
+**On the Mac (once)**
+1. Install Node.js 18+ and Claude Code (`claude`, logged in). Xcode gives the bridge the natural Thai voice.
+2. Install the bridge as a login service (starts at login, restarts if it dies, keeps the Mac awake while it runs):
    ```sh
    scripts/bridge-service.sh install ~/path/to/project   # prints the pairing code
    scripts/bridge-service.sh status | code | logs | uninstall
    ```
-   Or run it in a terminal: `node bridge/voxcode-bridge.mjs --workspace ~/path/to/project`.
    The code is saved in `~/.voxcode/pairing-code` (`--new-code` revokes it) and never written to the log.
-2. Open `VoxCodeMobile/VoxCodeMobile.xcodeproj` in Xcode, pick your Team under Signing, and run on your iPhone.
-3. Enter the pairing code. On the same Wi-Fi the bridge is found automatically; otherwise type its address (e.g. a Tailscale IP).
-4. Tap the mic, speak, pause: it sends after 2 s of silence. Or tap 〰️ for a hands-free call.
+
+**On the iPhone (once, with a cable)**
+1. iPhone: Settings › Privacy & Security › **Developer Mode** on (restarts the phone).
+2. Xcode: Settings › Accounts › add your Apple ID. Open `VoxCode.xcworkspace`, target **VoxCodeMobile** › Signing & Capabilities › Team = your Personal Team, Bundle Identifier `com.voxagent.ai` (or any unique one).
+3. Choose the iPhone as the run destination and press ▶︎. First time: iPhone Settings › General › VPN & Device Management › trust your Apple ID.
+4. In the app, allow Microphone, Speech Recognition and Local Network, then pair with the code.
+
+**Every 7 days** a free-Apple-ID app expires: press ▶︎ in Xcode again (cable, or Window › Devices and Simulators › *Connect via network* to do it over Wi-Fi). SideStore can refresh it automatically.
+
+**Away from home Wi-Fi:** install Tailscale (free) on the Mac and the iPhone with the same account, and put the Mac's Tailscale address (100.x.x.x) in *Mac address* when pairing. The app looks for the bridge on the local Wi-Fi first and uses that address only when it isn't there, so one setting works everywhere.
+
+**If answers stop:** `claude` may have logged out ("OAuth session expired" in the app): run `claude` in Terminal to log in again. The Mac must be on (closing the lid sleeps it).
+
+## Using it
+
+Tap the mic, speak, pause: it sends when you stop talking. Or tap 〰️ for a hands-free call in the chat: a waveform bar shows listening/working/speaking, with mute, stop and hang-up buttons; say "หยุด" to cut in.
+
+Spoken requests that would change files ("แก้…", "สร้างไฟล์…", "fix…") are read back for a yes/no first, because speech-to-text can mishear (e.g. "markdown" → "มาร์คดาว"). Typed or reviewed text runs directly. Turn it off in ⋯ › *Confirm before changes*.
 
 The app reconnects on its own when the bridge restarts or the network drops; only a wrong pairing code needs you.
 
@@ -41,7 +57,7 @@ By default the bridge offers Claude Code and Codex. Put a list in `~/.voxcode/ag
 
 Answers come back in the app's speech language (Thai by default); the bridge states it at the start and end of every prompt.
 
-## Mac app
+## Mac app (kept for experiments)
 
 ```sh
 ./scripts/build-app.sh   # builds "build/Vox Agent.app" (a bundle is required for mic/speech permissions)

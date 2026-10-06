@@ -161,3 +161,34 @@ enum EchoGuard {
         return (0..<chars.count - 1).map { String(chars[$0...$0 + 1]) }
     }
 }
+
+/// Spoken requests are easy to mishear ("markdown" → "มาร์คดาว"), so ones that look like they change files are
+/// confirmed before the coding agent runs them.
+enum ChangeIntent {
+    // ponytail: keyword match, not understanding; misses unusual phrasings. Ask the agent for a plan first if it matters.
+    static let words = [
+        "แก้", "สร้าง", "ลบ", "เพิ่ม", "เขียน", "เปลี่ยน", "ย้าย", "ติดตั้ง", "อัปเดต", "อัพเดท", "อัพเดต", "ทำไฟล์", "เปลี่ยนชื่อ",
+        "fix", "create", "delete", "remove", "add", "write", "edit", "change", "rename", "refactor", "update",
+        "install", "implement", "generate", "deploy", "commit", "push", "merge", "migrate",
+    ]
+
+    static func mayChangeFiles(_ request: String) -> Bool {
+        let text = request.lowercased()
+        return words.contains { text.contains($0) }
+    }
+}
+
+/// A spoken yes/no to a confirmation question. Anything else is treated as a new request.
+enum SpokenAnswer: Equatable {
+    case yes, no, other
+
+    init(_ text: String) {
+        let t = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        // "No" first: "ไม่ใช่" contains "ใช่", "ไม่ได้" contains "ได้".
+        let no = ["ไม่", "ยกเลิก", "อย่า", "หยุด", "no", "nope", "cancel", "stop", "don't"]
+        let yes = ["ใช่", "ได้", "โอเค", "ตกลง", "ยืนยัน", "เอาเลย", "ทำเลย", "จัดไป", "ถูกต้อง", "ok", "okay", "yes", "yeah", "yep", "sure", "go ahead", "confirm"]
+        // Only short replies count: "ได้ แต่แก้ไฟล์อื่นแทน" is a new instruction, not a yes.
+        guard t.count <= 20 else { self = .other; return }
+        if no.contains(where: t.contains) { self = .no } else if yes.contains(where: t.contains) { self = .yes } else { self = .other }
+    }
+}

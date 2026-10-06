@@ -119,7 +119,11 @@ public final class BridgeClient: AgentRunner {
 
     private var browser: NWBrowser?
     private var connection: NWConnection?
-    private var target: (code: String, host: String?, port: UInt16)?
+    private var target: (code: String, host: String?, port: UInt16, preferLocal: Bool)?
+    /// The saved address to fall back to when the bridge isn't on this network (e.g. a Tailscale IP).
+    private var savedEndpoint: (endpoint: NWEndpoint, parameters: NWParameters)?
+    private var fallbackTask: Task<Void, Never>?
+    private var usingSavedEndpoint = false
     private var retryTask: Task<Void, Never>?
     private var attempts = 0
     private var pending: (id: UUID, onEvent: @MainActor (AgentEvent) -> Void, onFinish: @MainActor (AgentStatus, String?) -> Void)?
@@ -132,20 +136,28 @@ public final class BridgeClient: AgentRunner {
 
     /// Connects to `host` if given, otherwise to the first bridge Bonjour finds on the local network.
     /// Keeps reconnecting (1 s, 2 s … up to 5 s apart) if the bridge goes away, until `disconnect()` or a wrong code.
-    public func connect(pairingCode: String, host: String? = nil, port: UInt16 = VoxRemote.defaultPort) {
-        target = (pairingCode, host, port)
+    /// - Parameter preferLocalNetwork: with a saved `host`, look for the bridge on this Wi-Fi first (Bonjour) and
+    ///   use `host` only if it isn't found within 1.5 s — so one setting works at home and away (Tailscale).
+    public func connect(pairingCode: String, host: String? = nil, port: UInt16 = VoxRemote.defaultPort, preferLocalNetwork: Bool = false) {
+        target = (pairingCode, host, port, preferLocalNetwork)
         attempts = 0
         start()
     }
 
     private func start() {
-        guard let (pairingCode, host, port) = target else { return }
+        guard let (pairingCode, host, port, preferLocal) = target else { return }
         teardown()
         let parameters = NWParameters.voxcode(pairingCode: pairingCode)
+        usingSavedEndpoint = false
+        savedEndpoint = nil
         if let host, !host.isEmpty {
-            macName = host
-            open(.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!), parameters)
-            return
+            savedEndpoint = (.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!), parameters)
+            if !preferLocal { return useSavedEndpoint() }
+            fallbackTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, !Task.isCancelled, self.connection == nil else { return }
+                self.useSavedEndpoint()
+            }
         }
         state = .searching
         // ponytail: connects to the first Mac found; add a picker if people run several bridges.
@@ -157,12 +169,26 @@ public final class BridgeClient: AgentRunner {
                 self.browser?.cancel()
                 self.browser = nil
                 self.open(result.endpoint, parameters)
+                // A rejected Bonjour endpoint can keep retrying its other addresses instead of failing,
+                // so if it isn't talking to us within 3 s, use the saved address.
+                if self.savedEndpoint != nil {
+                    self.fallbackTask?.cancel()
+                    self.fallbackTask = Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(3))
+                        guard let self, !Task.isCancelled, !self.isConnected, !self.usingSavedEndpoint else { return }
+                        self.useSavedEndpoint()
+                    }
+                }
             }
         }
         browser.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
-                if case .failed(let error) = state { self?.fail("Can't search the local network: \(error.localizedDescription)", retry: true) }
-                if case .waiting(let error) = state { self?.fail("Local network access is off or unavailable: \(error.localizedDescription). Allow it in Settings › Privacy & Security › Local Network.", retry: false) }
+                guard let self else { return }
+                // Can't search this network: go straight to the saved address if there is one.
+                if case .failed = state, self.savedEndpoint != nil { return self.useSavedEndpoint() }
+                if case .waiting = state, self.savedEndpoint != nil { return self.useSavedEndpoint() }
+                if case .failed(let error) = state { self.fail("Can't search the local network: \(error.localizedDescription)", retry: true) }
+                if case .waiting(let error) = state { self.fail("Local network access is off or unavailable: \(error.localizedDescription). Allow it in Settings › Privacy & Security › Local Network.", retry: false) }
             }
         }
         self.browser = browser
@@ -176,7 +202,21 @@ public final class BridgeClient: AgentRunner {
         state = .disconnected
     }
 
+    private func useSavedEndpoint() {
+        guard let (endpoint, parameters) = savedEndpoint else { return }
+        fallbackTask?.cancel()
+        browser?.cancel()
+        browser = nil
+        connection?.cancel()
+        connection = nil
+        usingSavedEndpoint = true
+        if case .hostPort(let host, _) = endpoint { macName = "\(host)" }
+        open(endpoint, parameters)
+    }
+
     private func teardown() {
+        fallbackTask?.cancel()
+        fallbackTask = nil
         for request in speechRequests.values { request.resume(throwing: BridgeError("Disconnected from the agent bridge.")) }
         speechRequests = [:]
         retryTask?.cancel()
@@ -193,6 +233,8 @@ public final class BridgeClient: AgentRunner {
     }
 
     private func lost(_ error: NWError?) {
+        // A bridge found on this Wi-Fi that isn't ours (wrong key) or that went away: try the saved address.
+        if savedEndpoint != nil, !usingSavedEndpoint, connection != nil { return useSavedEndpoint() }
         if Self.isAuthFailure(error) {
             fail("The bridge rejected the pairing code. Check the code and pair again.", retry: false)
         } else {
